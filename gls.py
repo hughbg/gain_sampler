@@ -1,8 +1,5 @@
 import numpy as np
-import sys
-import sympy as sp
-from plot import plot_x_hist
-from vis_creator import VisSim, perturb_gains, perturb_vis
+from calcs import split_re_im, unsplit_re_im
 
 
 def gls_inv_covariance(proj, Ninv):
@@ -27,82 +24,86 @@ def gls_inv_covariance(proj, Ninv):
     return np.linalg.inv(np.dot(proj.T, np.dot(Ninv, proj)))
 
 
-def gls_solution(proj, Ninv, data, inv_cov=None):
+def gls_solve(vis):
     """
     Calculate the generalised least-squares solution for the gain fluctuations. 
     The model is V_ij ~ \bar{g}_i \bar{g}_j V_ij^model (1 + x_i + x_j).
+    
+    The x values will be updated in vis.
+    
+    Parameters
+    ----------
+    
+    vis: VisSim, VisCal, or VisTrue object
     """
-    def rms(v):
-        assert len(v.shape) == 1
-        return np.sqrt(np.sum(v**2))
+    
+    def reduce_dof(p):
+        best = 1e9
+        for i in range(1, p.shape[1], 2):
+            cut = np.delete(p, i, axis=1)
+            cond = np.linalg.cond(np.dot(cut.T, cut))
+            if cond < best:
+                cond = best
+                where_best = i
+
+        return np.delete(p, where_best, axis=1), where_best
+
+    def restore_x(x_red, where):
+        return np.insert(x_red, where, 0)
+    
+    def generate_proj(g_bar, model):
+        
+        def separate_real_imag(g0, g1, Vm):
+            V = g0*g1*Vm
+            Vij_re = (g0*g1*Vm).real
+            Vij_im = (g0*g1*Vm).imag
+            #print(Vij_re, -Vij_im, Vij_im, Vij_re); exit()
+       
+            return Vij_re, Vij_im
+
+        # Generate the projection operator
+        proj = np.zeros((model.size*2, g_bar.size*2))
+        k = 0
+        for i in range(g_bar.size):
+            for j in range(i+1, g_bar.size):
+                re, im = separate_real_imag(g_bar[i], np.conj(g_bar[j]), model[k])
+
+                proj[k*2,i*2] = re; proj[k*2,i*2+1] = -im
+                proj[k*2,j*2] = re; proj[k*2,j*2+1] = im
+
+                proj[k*2+1,i*2] = im; proj[k*2+1,i*2+1] = re
+                proj[k*2+1,j*2] = im; proj[k*2+1,j*2+1] = -re
+
+                k += 1
+
+        return proj
+    
+    if vis.level != "approx": 
+        raise RuntimeError("GLS can only operate on offsets calculated approximately")
+    
+    # Convert the variances into an expanded diagonal array 
+    Ninv = np.linalg.inv(np.diag(np.repeat(vis.variances, 2)))
+    
+    # Generate projection matrix
+    proj = generate_proj(vis.g_bar, vis.V_model)
    
-    # Calculate inverse covariance of solution if needed
-    if inv_cov is None:
-        inv_cov = gls_inv_covariance(proj, Ninv)
-    if np.linalg.cond(inv_cov) > 4:
-        print("inv_cov condition")
+    # Now remove a column from the proj matrix, which will reduce the
+    # number of x values found by 1. This removes a degree of freedom
+    # so a solution can be found.
+    proj, where_cut = reduce_dof(proj)
+
+    inv_cov = gls_inv_covariance(proj, Ninv)
     
     #print("RMS", rms(np.dot(Ninv, data)), rms(np.dot(proj.T, np.dot(Ninv, data))))
     # Calculate GLS solution
     
-    xhat = np.dot(inv_cov, np.dot(proj.T, np.dot(Ninv, data)))
+    xhat = np.dot(inv_cov, np.dot(proj.T, np.dot(Ninv, split_re_im(vis.get_normalized_observed()))))
     
-    # Return solution and inverse covariance
-    return xhat, inv_cov
+    # Restore the missing x value and set it to zero. Form complex numbers.
+    vis.x = unsplit_re_im(restore_x(xhat, where_cut))      
 
-
-def gls(perturb_percent, perturb_this):
-
-    def one_line(a):
-        s = "[ "
-        for x in a: s += "{:.4f}".format(x)+" "
-        s += "]"
-        return s
-
-    NANT = 4
-    NBASELINE = 6
-    NUM_TRIALS = 1000
-
-    print("gls", perturb_percent)
-
-    if perturb_this not in [ "gain", "vis" ]:
-        raise ValueError("\"perturb_this\" has unknown value")
-
-    if perturb_percent is not None:
-        val_in = np.empty((NUM_TRIALS, NBASELINE))
-        val_out = np.empty((NUM_TRIALS, NBASELINE))
-    else:
-        val_in = np.empty((NUM_TRIALS, NANT))
-        val_out = np.empty((NUM_TRIALS, NANT))
-
-    for i in range(NUM_TRIALS):
-
-        print(i, end=" "); sys.stdout.flush()
-
-        vis_values = VisSim(NANT, level="approx")   # Can't use level="exact" for GLS
-        var_mc = sp.Matrix([0.01 for i in range(len(vis_values.V))])
-
-        if perturb_percent is not None:
-            val_in[i] = vis_values.calculate_bl_gains()
-            if perturb_this == "gain": p_vis_values = perturb_gains(vis_values, perturb_percent)
-            else: p_vis_values = perturb_vis(vis_values, perturb_percent)
-            p_vis_values.x = gls_solution(p_vis_values.proj, np.eye(p_vis_values.proj.shape[0]), 
-                    p_vis_values.calculate_normalized_observed())[0]
-            val_out[i] = p_vis_values.calculate_bl_gains()
-            """
-            if np.max(np.abs(val_out[i])) > 200: 
-                #vis_values.print()
-                #p_vis_values.print()
-                print("Bad", "proj*x", np.dot(p_vis_values.proj, p_vis_values.x), "x", one_line(p_vis_values.x), "norm vis", one_line(p_vis_values.calculate_normalized_observed()), p_vis_values.calculate_observed()); exit()
-            else: print("Good", p_vis_values.calculate_normalized_observed())
-            """
-            plot_x_hist(val_in[:i+1], val_out[:i+1],
-                    "g_hist_gls_"+str(perturb_percent)+".png", "g_in", "g_out")
-        else:
-            val_in[i] = vis_values.x
-            val_out[i] = gls_solution(vis_values.proj, np.eye(vis_values.proj.shape[0]), 
-                    vis_values.calculate_normalized_observed())[0]
-            plot_x_hist(val_in[:i+1], val_out[:i+1], "x_hist_gls.png")
-
-    print()
-
+if __name__ == "__main__":
+    from vis_creator import VisSim
+    v = VisSim(4)
+    gls_solve(v)
+    print(v.get_chi2())     # Should be 0 or near 0 because there is no perturbation
