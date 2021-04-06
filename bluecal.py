@@ -6,15 +6,33 @@ from vis_creator import VisCal, VisTrue
 from gls import gls_solve
 
 
-def bluecal_run(file_root):
+def bluecal_run(file_root, which_time, which_freq, niter):
+    """
+    Load data from a non-redundant-pipeline and iterate this: update model, run GLS.
+    
+    Parameters
+    ----------
+    file_root : str
+        File path referring to a non-redundant "case". It will use that path to
+        select  files from the simulation based on their extension.
+    which_time, which_freq : int
+        Select this time step and frequency channel from the simulation.
+    niter : int
+        Number of iterations.
+    """
+    
     def rms(x, y): return np.abs(np.sqrt(np.mean((x-y)**2)))
 
-    def plot_cals(true, calibrated, title, label1, label2, step):
+    def plot_cals(vis1, vis2, title, label1, label2, step):
         s = 3
 
+        # Plot seems to have a problem with complex128. Some values may come
+        # out as that type even though initial values are complex64.
+        v1 = vis1.astype(np.complex64)
+        v2 = vis2.astype(np.complex64)
         plt.clf()
-        plt.scatter(np.real(true), np.imag(true), marker="x", label=label1, s=20)
-        plt.scatter(np.real(calibrated), np.imag(calibrated), label=label2, s=s)
+        plt.scatter(np.real(v1), np.imag(v1), marker="x", label=label1, s=20)
+        plt.scatter(np.real(v2), np.imag(v2), label=label2, s=s)
         plt.xlabel("Re")
         plt.ylabel("Im")
         plt.legend()
@@ -23,10 +41,10 @@ def bluecal_run(file_root):
         plt.savefig(label1.replace(" ", "_")+str(step)+".png")
         
         plt.clf()
-        plt.scatter(np.real(true-calibrated), np.imag(true-calibrated), s=s)
+        plt.scatter(np.real(v1-v2), np.imag(v1-v2), s=s)
         plt.xlabel("Re")
         plt.ylabel("Im")
-        plt.title("Difference between\n"+label1+" and "+label2+"\nDiff="+str(rms(true, calibrated)), fontsize=10)
+        plt.title("Difference between\n"+label1+" and "+label2+"\nDiff="+str(rms(v1, v2)), fontsize=10)
         plt.tight_layout()
         plt.savefig(label1.replace(" ","_")+"_diff_"+str(step)+".png")
 
@@ -49,8 +67,8 @@ def bluecal_run(file_root):
     plt.figure(figsize=(4, 4))
     open("plot_cals.html", "w").close()
 
-    vis_values = VisCal(file_root, time=0, freq=0)
-    true_vis_values = VisTrue(file_root, time=0, freq=0)
+    vis_values = VisCal(file_root, time=which_time, freq=which_freq)
+    true_vis_values = VisTrue(file_root, time=which_time, freq=which_freq)
     
     print("Chi squared calibrated:", round(vis_values.get_chi2(), 2), "Chi squared true:", round(true_vis_values.get_chi2(), 2))
     
@@ -60,7 +78,7 @@ def bluecal_run(file_root):
     f.close()
 
     
-    for i in range(1):
+    for i in range(niter):
 
         print(i, "-----------")
         
@@ -78,4 +96,4 @@ def bluecal_run(file_root):
 
 if __name__ == "__main__":
     
-    bluecal_run(sys.argv[1])
+    bluecal_run(sys.argv[1], 0, 0, 1)
