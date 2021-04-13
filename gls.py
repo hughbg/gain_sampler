@@ -1,5 +1,44 @@
 import numpy as np
+import scipy.linalg
 from calcs import split_re_im, unsplit_re_im
+
+def sample(S, N, A, d):
+    """
+    Sample a multidimensional Gaussian distribution as described in 
+    Eriksen, https://arxiv.org/abs/0709.1058.
+
+    Equation 12, but without multiple frequencies.
+
+    TODO: maybe change these symbols to the GLS symbols.
+    """
+
+    if S is None and N is None:
+        raise ValueError("S and N cannot both be None")
+        
+    if S is None:
+        S_inv = np.zeros((A.shape[1], A.shape[1]))
+    else: 
+        S_inv = np.linalg.inv(S)
+
+    if N is None:
+        N_inv = np.zeros((A.shape[0], A.shape[0]))
+    else: 
+        N_inv = np.linalg.inv(N)
+
+    w_0 = np.random.normal(size=S_inv.shape[1])
+    w_1 = np.random.normal(size=N_inv.shape[1])
+        
+    lhs_term = np.linalg.inv(S_inv+np.dot(A.T, np.dot(N_inv, A)))  # inversed
+    rhs_term_1 = np.dot(A.T, np.dot(N_inv, d))
+    rhs_term_2 = np.dot(scipy.linalg.sqrtm(S_inv), w_0)
+    rhs_term_3 = np.dot(A.T, np.dot(scipy.linalg.sqrtm(N_inv), w_1))
+    rhs = rhs_term_1+rhs_term_2+rhs_term_3
+    s = np.dot(lhs_term,  rhs)
+    
+    s_var = np.mean(np.diag(lhs_term))
+    s_hat = np.mean(np.diag(np.dot(lhs_term, rhs_term_1)))
+
+    return s, s_hat, s_var
 
 
 def gls_inv_covariance(proj, Ninv):
@@ -86,7 +125,7 @@ def gls_solve(vis):
     
     # Generate projection matrix
     proj = generate_proj(vis.g_bar, vis.V_model)
-   
+    
     # Now remove a column from the proj matrix, which will reduce the
     # number of x values found by 1. This removes a degree of freedom
     # so a solution can be found.
