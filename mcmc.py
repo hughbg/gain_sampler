@@ -1,8 +1,9 @@
 import numpy as np
 import emcee
 import copy
-from vis_creator import VisSim, perturb_gains, perturb_vis
+from calcs import split_re_im, unsplit_re_im
 
+BURN_IN = 0.5
 
 def estimate_variance(perturb_percent, perturb_this, level):
     """
@@ -25,7 +26,7 @@ def estimate_variance(perturb_percent, perturb_this, level):
     Returns
     -------
     float
-        The variance.
+        The variance on real and imag values.
     
     """
     nant = 1000
@@ -45,16 +46,16 @@ def estimate_variance(perturb_percent, perturb_this, level):
 
     all_dy_values = vis_values.V_obs-vis_values.get_simulated_visibilities()
     
-    return np.mean(np.abs(all_dy_values)**2)    # What to do about real/imag - separate?
+    return np.mean(np.abs(split_re_im(all_dy_values)**2))    
 
-def loglike(x, vis_values, var_vec):
+def loglike(x, proj, V_reduced, var_vec):
     """
     Calculate likelihood.
     
     Parameters
     ----------
     x : array_like
-        Gain offset values.
+        Gain offset values split re/im.
     vis_values : VisSim, VisCal, or VisTrue object.
         Original visibilties, model, gains. Using the "x" values, 
         calculate new visibilities from model times gains (with "x").
@@ -67,22 +68,18 @@ def loglike(x, vis_values, var_vec):
         Likelihood.
     
     """
-    
-    # Create a new vis object with modified x values
-    new_vis_values = copy.copy(vis_values)
-    new_vis_values.x = x
-    
+
     # Find the difference in visibilities based on the new x
-    dys = new_vis_values.V_obs-new_vis_values.get_simulated_visibilities()
+    dys = V_reduced-np.dot(proj, x)
 
     # Calculate likelihood
     dchi2 = 0
     for i, dy in enumerate(dys):
-        dchi2 += -0.5 * np.abs(dy)**2 * (1./var_vec[i])
+        dchi2 += -0.5 * dy**2 * (1./var_vec[i])
 
     return dchi2
 
-def run_mcmc(vis_values, variances, iters):
+def run_mcmc(proj, V_reduced, variances, iters):
     """
     Parameters
     ----------
@@ -101,13 +98,14 @@ def run_mcmc(vis_values, variances, iters):
         Second array is the likelihood chain of shape ((iters-burn_in)*nwalkers)
     """
 
+    
     # Set up emcee sampler
-    ndim = vis_values.g_bar.size
+    ndim = proj.shape[1]
     nwalkers = ndim * 3
     p0 = 0.01 * np.random.rand(nwalkers, ndim)
 
     # Set-up sampler object
-    sampler = emcee.EnsembleSampler(nwalkers, ndim, loglike, args=[vis_values, variances])
+    sampler = emcee.EnsembleSampler(nwalkers, ndim, loglike, args=[proj, V_reduced, variances])
 
     # Run sampler
     for sample in sampler.sample(p0, iterations=iters, progress=False):
@@ -115,8 +113,8 @@ def run_mcmc(vis_values, variances, iters):
         if sampler.iteration % 100:
             continue
 
-    samples = sampler.get_chain(flat=True)
-    prob = sampler.get_log_prob(flat=True)
+    samples = sampler.get_chain(flat=True, discard=int(iters*BURN_IN))
+    prob = sampler.get_log_prob(flat=True, discard=int(iters*BURN_IN))
 
     return samples, prob
 

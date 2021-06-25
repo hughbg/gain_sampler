@@ -2,16 +2,41 @@ import matplotlib.pyplot as plt
 import numpy as np
 import sys
 from plot import plot_compare
-from vis_creator import VisSim, perturb_gains, perturb_vis
-from gls import gls_solve
+from vis_creator import VisSim, perturb_gains, perturb_model
+from gls import gls_solve, reduce_dof, generate_proj
 from mcmc import run_mcmc, estimate_variance, loglike
+from calcs import split_re_im, unsplit_re_im
 
-def mcmc_sim(perturb_percent, perturb_this, num_trials, level):
+def mcmc_sim(perturb_percent, perturb_this, sample_this, num_trials):
     
-    def extract_x_results(samp, prob):
+    def extract_results(samp, prob):
         """
-        Extract the best "x" values from the sampling, based on
+        Extract the best values from the sampling, based on
         likelihoods.
+        
+        Parameters
+        ----------
+        samp : array_like
+            Shape of samp: ((niter-burn_in)*nwalkers, number of values) 
+        prob : array_like
+            Shape of prob: ((niter-burn_in)*nwalkers)
+        
+        Returns
+        -------
+        array_like
+            Array of values.
+        """
+        where_best = np.argmax(prob) 
+        
+        vals = np.empty(samp.shape[1])
+        for k in range(samp.shape[1]):
+            vals[k] = samp[where_best, k]
+        
+        return vals
+    
+    def sample_stats(what, samp):
+        """
+        Print mean/variance of samples
         
         Parameters
         ----------
@@ -20,65 +45,71 @@ def mcmc_sim(perturb_percent, perturb_this, num_trials, level):
         prob : array_like
             Shape of prob: ((niter-burn_in)*nwalkers)
         
-        Returns
-        -------
-        array_like
-            Array of x values.
+        
         """
-        where_best = np.argmax(prob[int(prob.size*0.6):]) # Ignore first 60%
-        
-        vals = np.empty(samp.shape[1])
-        for k in range(samp.shape[1]):
-            vals[k] = samp[where_best, k]
-        
-        return vals
+        for i in range(samp.shape[1]):
+            print(what+"_"+str(i)+":", np.mean(samp[:,i]), np.var(samp[:,i]))
+            
 
     print("mcmc sim, perturb", perturb_this, "by", str(perturb_percent)+"%")
     NANT = 4
     NBASELINE = 6
 
-    if perturb_this not in [ "gain", "vis" ]:
-        raise ValueError("\"perturb_this\" has unknown value")
+    if perturb_this not in [ "gain", "model" ]:
+        raise ValueError("\"perturb_this\" has unknown value "+perturb_this)
 
-    if level not in [ "exact", "approx" ]:
-        raise ValueError("Invalid level in mcmc")
-
-
-    # Estimate the variance that will be generated
-    variance = estimate_variance(perturb_percent, perturb_this, level)
+    if sample_this not in [ "x", "model" ]:
+        raise ValueError("\"sample_this\" has unknown value "+sample_this)
 
     for i in range(num_trials):
 
         print(i, end=" "); sys.stdout.flush()
 
-        vis_values = VisSim(NANT, level=level)
+        vis_values = VisSim(NANT, level="approx", random_seed=99)
         
+        if sample_this == "x":
+            proj, _ = reduce_dof(generate_proj(vis_values.g_bar, vis_values.V_model), True)
+            data_vector = split_re_im(vis_values.get_reduced_observed())
+        else: 
+            proj = np.eye(vis_values.V_model.size*2)
+            data_vector = split_re_im(vis_values.get_calibrated_visibilities())
+
         if i == 0: 
             val_in = np.empty((num_trials, vis_values.V_obs.size), np.complex64)
             val_out = np.empty((num_trials,vis_values.V_obs.size), np.complex64)
-            var_mc = np.full(vis_values.V_obs.size, variance)
-                
-        val_in[i] = vis_values.get_baseline_gains()     # save
+
+        # This is what we want to compare against for assessing quality of mcmc results
+        if sample_this == "x":
+            val_in[i] = vis_values.get_baseline_gains()     # save
+        else:
+            val_in[i] = vis_values.V_obs
  
-        if perturb_this == "vis":
-            p_vis_values = perturb_vis(vis_values, perturb_percent)
+        if perturb_this == "model":
+            p_vis_values = perturb_model(vis_values, perturb_percent)
         else:
             p_vis_values = perturb_gains(vis_values, perturb_percent)
         
         # Run MCMC sampling
-        samp, prob = run_mcmc(p_vis_values, var_mc, 2000)
-
+        samp, prob = run_mcmc(proj, data_vector, np.repeat(p_vis_values.obs_variance, 2), 10000)
+        print()
+        
         # Get best values
-        p_vis_values.x = extract_x_results(samp, prob)
 
-        val_out[i] = p_vis_values.get_baseline_gains()
-
-        if level == "exact":
-            plot_compare(val_in[:i+1], val_out[:i+1],
-                    "g_hist_mcmc_"+str(perturb_percent)+".png", "g_in", "g_out")
+        if sample_this == "x":
+            sample_stats("x", samp)
+            p_vis_values.x = unsplit_re_im(np.append(extract_results(samp, prob), 0))
+            val_out[i] = p_vis_values.get_baseline_gains()
+            initial = "g"
         else:
-            plot_compare(val_in[:i+1], val_out[:i+1],
-                    "g_approx_hist_mcmc_"+str(perturb_percent)+".png", "g_in", "g_out")
+            sample_stats("model", samp)
+            p_vis_values.V_model = unsplit_re_im(extract_results(samp, prob))
+            val_out[i] = p_vis_values.get_simulated_visibilities()
+            initial = "m"
+
+        print(val_in[i])
+        print(val_out[i])
+        plot_compare(val_in[:i+1], val_out[:i+1],
+                    initial+"_approx_hist_mcmc_"+str(perturb_percent)+".png", initial+"_in", initial+"_out")
 
     print()
 
@@ -111,11 +142,11 @@ def gls_sim(perturb_percent, perturb_this, num_trials):
             raise ValueError("What to perturb is not properly specified")
 
         # Find new x values
-        gls_solve(p_vis_values)
+        p_vis_values.x = gls_solve(p_vis_values)
             
         val_out[i] = p_vis_values.get_baseline_gains()          
             
-        #print("val_in", val_in[i], "\nval_out", val_out[i], "\n Diff", np.mean(np.abs((val_in[i]-val_out[i])/val_in[i])*100))
+        print("val_in", val_in[i], "\nval_out", val_out[i], "\n Diff", np.mean(np.abs((val_in[i]-val_out[i])/val_in[i])*100))
         plot_compare(val_in[:i+1], val_out[:i+1], "g_hist_gls_"+str(perturb_percent)+".png", "g_in", "g_out")
  
     print()
@@ -127,6 +158,7 @@ if __name__ == "__main__":
     
     from multiprocessing import Process
 
+    mcmc_sim(0, "gain", "model", 1); exit()
     """
     # GLS
     processes = []

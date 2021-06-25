@@ -85,8 +85,8 @@ def bluecal_run(file_root, which_time, which_freq, niter):
         # Update model
         vis_values.V_model = vis_values.get_calibrated_visibilities()
 
-        gls_solve(vis_values)
-
+        vis_values.x = gls_solve(vis_values)
+        
         print("Chi squared calibrated:", round(vis_values.get_chi2(), 2), "Chi squared true:", round(true_vis_values.get_chi2(), 2))
 
         f = open("plot_cals.html", "a")
