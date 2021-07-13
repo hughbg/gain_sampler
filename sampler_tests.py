@@ -365,13 +365,14 @@ def sample_model():
     
 def gibbs():
     def new_x_distribution(v):
-        # The model has been updated
-        
+        # The model has been updated so get a new distribution.
+        # If S is set to None and the model is never changed then
+        # the mean of the x distribution will be the GLS solution.
 
         A, where = reduce_dof(generate_proj(v.g_bar, v.V_model), True)  # depends on model
         N = np.diag(np.repeat(v.obs_variance, 2))
         d = split_re_im(v.get_reduced_observed())                       # depends on model
-        S = np.eye(A.shape[1])*1e-4
+        S = np.eye(A.shape[1])*1e-8
 
         if S is None:
             inv_S = np.zeros((A.shape[1], A.shape[1]))
@@ -425,19 +426,35 @@ def gibbs():
                 
             
     def new_model_distribution(v):
-        # The x values have been updated
+        # The x values have been updated so get a new distribution.
+        # If the x value has not been changed and C is set to None
+        # and N = I then the mean of the distribution will be the 
+        # v.V_model
         
         A = generate_m_proj(v)
         N = np.diag(np.repeat(v.obs_variance, 2))
         C = np.diag(np.repeat(v.obs_variance, 2))
         d = split_re_im(v.V_obs)
-        V = split_re_im(v.V_model)
+        V = split_re_im(v.get_calibrated_visibilities())
+
+        if C is None:
+            inv_C = np.zeros((v.nvis*2, v.nvis*2))
+        else:
+            inv_C = inv(C)
     
         term1 = np.dot(A.T, np.dot(inv(N), A))
-        dist_covariance = inv(term1+inv(C))
-        term2 = np.dot(A.T, np.dot(inv(N), d)+np.dot(inv(C), V))
+        dist_covariance = inv(term1+inv_C)
+        term2 = np.dot(A.T, np.dot(inv(N), d)+np.dot(inv_C, V))
         dist_mean = np.dot(dist_covariance, term2)
         
+        sigma_1 = inv(np.dot(A.T, np.dot(inv(N), A)))
+        mu_1 = np.dot(inv(A), d)
+        sigma_2 = C
+        mu_2 = V
+        
+        dist_mean = np.dot(np.dot(sigma_2, inv(sigma_1+sigma_2)), mu_1)+np.dot(np.dot(sigma_1, inv(sigma_1+sigma_2)), mu_2)
+        dist_covariance = np.dot(sigma_1, np.dot(inv(sigma_1+sigma_2), sigma_2))
+
         return dist_mean, dist_covariance
     
     
@@ -450,7 +467,7 @@ def gibbs():
     print("orig model", v.V_model)
     orig_v = copy.deepcopy(v)
 
-    num = 10000
+    num = 40000
 
     all_x = np.zeros((num, v.nant*2-1))       # -1 because there'll be a missing imaginary value
     all_model = np.zeros((num, v.nvis*2))
@@ -463,17 +480,17 @@ def gibbs():
     # Take num samples
     for i in range(num):
         # Use the sampled x to change the model sampling distribution, and take a sample
-        #v_model_sampling.x = new_x_sample
+        v_model_sampling.x = new_x_sample
         v_dist_mean, v_dist_covariance = new_model_distribution(v_model_sampling)
         all_model[i] = np.random.multivariate_normal(v_dist_mean, v_dist_covariance, 1)
         new_model_sample = unsplit_re_im(all_model[i])
         
         # Use the sampled model to change the x sampling distribution, and take a sample
-        #v_x_sampling.V_model = new_model_sample
+        v_x_sampling.V_model = new_model_sample
         x_dist_mean, x_dist_covariance, which_im_cut = new_x_distribution(v_x_sampling)
         all_x[i] = np.random.multivariate_normal(x_dist_mean, x_dist_covariance, 1)  
         new_x_sample = unsplit_re_im(restore_x(all_x[i], which_im_cut))
-        
+           
     all_data = np.hstack((all_x, all_model))
                      
     # Get log poseterior evaluate interpret similar to chi2
@@ -562,6 +579,8 @@ def gibbs():
     plt.clf()
     plt.hist(all_x[:, 0])
     plt.savefig("hist")
+    
+    # Get the peak of the distributions and see if it creates V_obs
     best_x = np.array([ np.mean(all_x[:, i]) for i in range(all_x.shape[1]) ])
     best_model = np.array([ np.mean(all_model[:, i]) for i in range(all_model.shape[1]) ])
     print(best_x, orig_v.x)
@@ -570,6 +589,8 @@ def gibbs():
     v.V_model = unsplit_re_im(best_model)
     print(orig_v.V_obs)
     print(v.get_simulated_visibilities())
+    print(np.abs(orig_v.V_obs))
+    print(np.abs(v.get_simulated_visibilities()))
     
     
     

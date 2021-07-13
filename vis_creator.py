@@ -77,9 +77,9 @@ class VisSim:
 
         self.nant = nant
         self.nvis = nvis
-        self.V_model = V_model
-        self.g_bar = g_bar
-        self.x = x
+        self.V_model = self.V_model_orig = V_model
+        self.g_bar = self.g_bar_orig = g_bar
+        self.x = self.x_orig = x
         self.level = level
         self.obs_variance = np.full(nvis, obs_variance)      # Baseline variances
 
@@ -124,7 +124,7 @@ class VisSim:
             The gains, indexed by baseline.
         """
 
-        V_sim = self.get_simulated_visibilities()
+        V_sim = self.get_simulated_visibilities()    # Used to do this a shorthand way
         
         return V_sim/self.V_model
 
