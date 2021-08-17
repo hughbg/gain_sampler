@@ -441,20 +441,26 @@ def gibbs():
             inv_C = np.zeros((v.nvis*2, v.nvis*2))
         else:
             inv_C = inv(C)
-    
+        
+        # Only want x values to go +/-10% 
+        # Fiddle with the prior widths
+        # Plot the distributions mathematically
+        # Focus day in the office working on this
+        # Equation 17
         term1 = np.dot(A.T, np.dot(inv(N), A))
         dist_covariance = inv(term1+inv_C)
         term2 = np.dot(A.T, np.dot(inv(N), d)+np.dot(inv_C, V))
         dist_mean = np.dot(dist_covariance, term2)
         
+        # Equation 13
+        
         sigma_1 = inv(np.dot(A.T, np.dot(inv(N), A)))
         mu_1 = np.dot(inv(A), d)
         sigma_2 = C
         mu_2 = V
-        
         dist_mean = np.dot(np.dot(sigma_2, inv(sigma_1+sigma_2)), mu_1)+np.dot(np.dot(sigma_1, inv(sigma_1+sigma_2)), mu_2)
         dist_covariance = np.dot(sigma_1, np.dot(inv(sigma_1+sigma_2), sigma_2))
-
+        
         return dist_mean, dist_covariance
     
     
@@ -493,7 +499,7 @@ def gibbs():
            
     all_data = np.hstack((all_x, all_model))
                      
-    # Get log poseterior evaluate interpret similar to chi2
+    # Get log posterior evaluate interpret similar to chi2
     # Plot compare plot of true vis vs sampled vis      (V_obs)
     print("Sample stats")
     sample_stats("x", all_x)
@@ -587,10 +593,10 @@ def gibbs():
     print(best_model, orig_v.V_model)
     v.x = unsplit_re_im(restore_x(best_x, 0))
     v.V_model = unsplit_re_im(best_model)
-    print(orig_v.V_obs)
-    print(v.get_simulated_visibilities())
-    print(np.abs(orig_v.V_obs))
-    print(np.abs(v.get_simulated_visibilities()))
+    print("orig", orig_v.V_obs)
+    print("recovered", v.get_simulated_visibilities())
+    print("orig amplitude", np.abs(orig_v.V_obs))
+    print("orig recovered amplitude", np.abs(v.get_simulated_visibilities()))
     
     
     
