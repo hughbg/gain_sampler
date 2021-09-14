@@ -1,5 +1,7 @@
 import matplotlib.pyplot as plt
 import numpy as np
+import corner
+import copy
 
 class PerturbedLine:
     def __init__(self, npoints):
@@ -8,9 +10,12 @@ class PerturbedLine:
         self.x = np.arange(npoints)+2
         self.b = (np.random.random(1)-0.5)*10
         self.a = (np.random.random(1)-0.5)*5
-        self.N_inv = np.diag(np.random.random(npoints))
+        self.N_inv = np.diag(np.random.random(npoints)*0.1)
         
-        self.s = self.a*self.x+self.b+(np.random.random(npoints)-0.5)*2
+        self.s = (1.2*self.a)*self.x+(self.b*1.2)+(np.random.random(npoints)-0.5)
+    
+    def rms(self):
+        return np.sqrt(np.mean((self.s-(self.a*self.x+self.b))**2))
         
     def print(self):
         print("s", self.s)
@@ -51,7 +56,7 @@ def plot_non_gaussian_by_a(c1, c2, c3, s, x, b, N_inv):
     plt.savefig("non_gaussian.png")
     
 
-def vec_likelihood_to_scalar(t, a, M):
+def vec_likelihood_to_scalar(t, M):
     """
     Given a vector liklihood of the form 
         (t-a)^T M (t-a)
@@ -93,10 +98,9 @@ def conditional_a(s, a, x, b, N_inv):
     p = s-b
     X = np.diag(x)
     t = np.dot(np.linalg.inv(X), p)
-    a_vec = np.full(s.size, a).T
     M = np.dot(np.dot(X.T, N_inv), X)
     
-    C1, C2, C3 = vec_likelihood_to_scalar(t, a, M)
+    C1, C2, C3 = vec_likelihood_to_scalar(t, M)
     
     mu, sigma_sqr = form_gaussian(C1, C2, C3)
     
@@ -107,7 +111,7 @@ def conditional_a(s, a, x, b, N_inv):
 def conditional_b(s, a, x, b, N_inv):
     q = s-a*x
     
-    C1, C2, C3 = vec_likelihood_to_scalar(q, b, N_inv)
+    C1, C2, C3 = vec_likelihood_to_scalar(q, N_inv)
     
     mu, sigma_sqr = form_gaussian(C1, C2, C3)
     
@@ -121,21 +125,96 @@ def combine_two_gaussians(mu_1, sigma_1_sqr, mu_2, sigma_2_sqr):
     
     return mu, sigma_sqr
 
+def new_a_distribution(s, a, x, b, N_inv):
+    # a is only used for checking
+    mu_a_cond, sigma_sqr_a_cond = conditional_a(s, a, x, b, N_inv)
+    mu_a, sigma_sqr_a = combine_two_gaussians(mu_a_cond, sigma_sqr_a_cond, mu_a_prior, sigma_sqr_a_prior)
+    return mu_a, sigma_sqr_a
+
+def new_b_distribution(s, a, x, b, N_inv):
+    # b is only used for checking
+    mu_b_cond, sigma_sqr_b_cond = conditional_b(s, a, x, b, N_inv)
+    mu_b, sigma_sqr_b = combine_two_gaussians(mu_b_cond, sigma_sqr_b_cond, mu_b_prior, sigma_sqr_b_prior)
+    return mu_b, sigma_sqr_b
+
 p = PerturbedLine(10)
 
 # Priors
 mu_a_prior = p.a
-sigma_sqr_a_prior = 0.1
+sigma_sqr_a_prior = 1
 mu_b_prior = p.b
-sigma_sqr_b_prior = 0.1
+sigma_sqr_b_prior = 1
                
-mu_a, sigma_a_sqr = conditional_a(p.s, p.a, p.x, p.b, p.N_inv)
-print(mu_a)
-mu_b, sigma_b_sqr = conditional_b(p.s, p.a, p.x, p.b, p.N_inv)
+num = 5000
 
-mu, sigma_sqr = combine_two_gaussians(mu_a, sigma_a_sqr, mu_a_prior, sigma_sqr_a_prior)
-plot_gaussian(mu, sigma_sqr)
-print(p.a, p.b)
+all_a = np.zeros(num)      
+all_b = np.zeros(num)
+
+likely_a, _ = conditional_a(p.s, p.a, p.x, p.b, p.N_inv)
+likely_b, _ = conditional_b(p.s, p.a, p.x, p.b, p.N_inv)
+pp = copy.copy(p)
+print("orig error", p.rms())
+pp.a = likely_a
+pp.b = likely_b
+print("error using likely a and b", pp.rms())
+exit()
+
+
+new_a_sample = p.a         # Initialize
+
+# Take num samples
+for i in range(num):
+    # Use the sampled a to change the b sampling distribution, and take a sample
+    mu, sigma_sqr = new_b_distribution(p.s, new_a_sample, p.x, p.b, p.N_inv)
+    all_b[i] = np.random.normal(mu, sigma_sqr)
+    new_b_sample = all_b[i]
+
+    # Use the sampled model to change the x sampling distribution, and take a sample
+    mu, sigma_sqr = new_a_distribution(p.s, p.a, p.x, new_b_sample, p.N_inv)
+    all_a[i] = np.random.normal(mu, sigma_sqr)
+    new_a_sample = all_a[i]
+    
+def best(a):
+    # Get the peak 
+    hist, bin_edges = np.histogram(a, bins=100)
+    bins = (bin_edges[1:]+bin_edges[:-1])/2
+    return bins[np.argmax(hist)]
+
+all_data = np.column_stack((all_a, all_b))
+
+
+# Plot all dist
+plt.clf()
+labels = [ "a", "b" ]
+figure = corner.corner(all_data, labels=labels, show_titles=True, use_math_text=True, labelpad=0.2)
+
+# Overplot GLS solution
+# Extract the axes
+#axes = np.array(figure.axes).reshape((v.nant*2-1, v.nant*2-1))
+
+# Loop over the diagonal
+#orig_x = split_re_im(orig_v.x)
+#for i in range(v.nant*2-1):
+#    ax = axes[i, i]
+#    ax.axvline(orig_x[i], color="r", linewidth=0.5)
+
+plt.tight_layout()
+plt.savefig("gibbs_all_dist.png")
+
+# Get the peak of the distributions
+hist, bin_edges = np.histogram(all_a, bins=100)
+
+best_a = best(all_a)
+best_b = best(all_b)
+print("a recovered vs. orig", best_a, p.a[0])
+print("b recovered vs. orig", best_b, p.b[0])
+print("orig error", p.rms())
+p.a = best_a
+p.b = best_b
+print("fitted error", p.rms())
+
+
+
 
 
 
