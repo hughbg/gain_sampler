@@ -50,12 +50,28 @@ def generate_proj(g_bar, model):
 
     return proj
 
-def reduce_dof(p, force=False):
+def generate_proj1(nvis, nant):
+
+
+    # Generate the projection operator
+    proj = np.zeros((nvis*2, nant*2))
+    k = 0
+    for i in range(nant):
+        for j in range(i+1, nant):
+ 
+            proj[k*2,i*2] = 1; proj[k*2,j*2] = 1
+
+            proj[k*2+1,i*2+1] = 1; proj[k*2+1,j*2+1] = -1
+
+            k += 1
+
+    return proj
+
+def reduce_dof(p):
     
-    if force:
-        where_best = p.shape[1]-1
-        return np.delete(p, where_best, axis=1), where_best
+    return np.delete(p, p.shape[1]-1, axis=1)
     
+"""
     best = 1e9
     for i in range(1, p.shape[1], 2):
         cut = np.delete(p, i, axis=1)
@@ -65,9 +81,10 @@ def reduce_dof(p, force=False):
             where_best = i
 
     return np.delete(p, where_best, axis=1), where_best
+"""
 
-def restore_x(x_red, where):
-    return np.insert(x_red, where, 0)
+def restore_x(x_red):
+    return np.append(x_red, 0)
 
 def gls_solve(vis):
     """
@@ -86,7 +103,7 @@ def gls_solve(vis):
         raise RuntimeError("GLS can only operate on offsets used approximately")
     
     # Convert the variances into an expanded diagonal array 
-    Ninv = inv(np.diag(np.repeat(vis.obs_variance, 2)))
+    Ninv = inv(np.diag(split_re_im(vis.obs_variance)))
     
     # Generate projection matrix
     proj = generate_proj(vis.g_bar, vis.V_model)
@@ -94,7 +111,7 @@ def gls_solve(vis):
     # Now remove a column from the proj matrix, which will reduce the
     # number of x values found by 1. This removes a degree of freedom
     # so a solution can be found.
-    proj, where_cut = reduce_dof(proj, True)
+    proj = reduce_dof(proj)
 
     inv_cov = gls_inv_covariance(proj, Ninv)
     
@@ -104,5 +121,5 @@ def gls_solve(vis):
     xhat = np.dot(inv_cov, np.dot(proj.T, np.dot(Ninv, split_re_im(vis.get_reduced_observed()))))
     
     # Restore the missing x value and set it to zero. Form complex numbers and update vis.
-    return unsplit_re_im(restore_x(xhat, where_cut))      
+    return unsplit_re_im(restore_x(xhat))      
 
