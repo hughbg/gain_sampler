@@ -2,51 +2,54 @@ import matplotlib.pyplot as plt
 from vis_creator import VisSim, VisCal, VisTrue
 from gls import gls_solve, generate_proj, generate_proj1, reduce_dof, restore_x
 from calcs import split_re_im, unsplit_re_im
+import corner
 import copy
 import numpy as np
 import scipy.linalg
 
+
+
 class Sampler:
     
-    def __init__(self, niter=1000, seed=None, random_the_long_way=False):
+    def __init__(self, niter=1000, burn_in=10, seed=None, random_the_long_way=False):
         if seed is not None:
             np.random.seed(seed)
         self.niter = niter
+        self.burn_in = burn_in
         self.random_the_long_way = random_the_long_way
     
     def load_nr_sim(self, path, time=0, freq=0, remove_redundancy=False, initial_solve_for_x=False):
         print("Loading NR sim from", path)
-        self.vis_sim = VisCal(path, time=time, freq=freq, remove_redundancy=remove_redundancy)
-        self.vis_sim_true = VisTrue(path, time=time, freq=freq)
+        self.vis_redcal = VisCal(path, time=time, freq=freq, remove_redundancy=remove_redundancy)
+        self.vis_true = VisTrue(path, time=time, freq=freq)
 
         if initial_solve_for_x:
-            self.vis_sim.x = self.vis_sim_true.initial_vals.x = gls_solve(self.vis_sim)
+            self.vis_redcal.x = self.vis_redcal.initial_vals.x = gls_solve(self.vis_redcal)
             
-    def load_sim(self, nant, initial_solve_for_x=False):
-        self.vis_sim = VisSim(nant)
-        self.vis_sim_true = self.vis_sim
+    def load_sim(self, nant, initial_solve_for_x=False, **kwargs):
+        self.vis_redcal = VisSim(nant, **kwargs)
+        self.vis_true = self.vis_redcal
         if initial_solve_for_x:
-            self.vis_sim.x = self.vis_sim_true.initial_vals.x = gls_solve(self.vis_sim)
+            self.vis_redcal.x = self.vis_redcal.initial_vals.x = gls_solve(self.vis_redcal)
             
-    def set_S_and_V(self, S, V_mean, Cv):
+    def set_S_and_V_prior(self, S, V_mean, Cv):
         self.S = S
         self.V_mean = V_mean
         self.Cv = Cv
         
     def nant(self):
-        return self.vis_sim.nant
+        return self.vis_redcal.nant
     
     def nvis(self):
-        return self.vis_sim.nvis
-        
-            
+        return self.vis_redcal.nvis
+                   
     def run(self):
         print("Running sampling")
-        all_x = np.zeros((self.niter, self.vis_sim.nant*2-1))       # -1 because there'll be a missing imaginary value
-        all_model = np.zeros((self.niter, self.V_mean.size*2))
-
-        v_x_sampling = copy.deepcopy(self.vis_sim)      
-        v_model_sampling = copy.deepcopy(self.vis_sim) 
+        sampled_x = np.zeros((self.niter, self.vis_redcal.nant*2-1))       # -1 because there'll be a missing imaginary value
+        sampled_V = np.zeros((self.niter, self.V_mean.size*2))
+ 
+        v_x_sampling = copy.deepcopy(self.vis_redcal)      
+        v_model_sampling = copy.deepcopy(self.vis_redcal) 
 
         new_x = v_model_sampling.x         # Initialize
         
@@ -55,72 +58,303 @@ class Sampler:
             # Use the sampled x to change the model sampling distribution, and take a sample
             v_model_sampling.x = new_x
             if self.random_the_long_way:
-                all_model[i] = self.V_random_draw(v_model_sampling)
+                sampled_V[i] = self.V_random_draw(v_model_sampling)
             else:
                 v_dist_mean, v_dist_covariance = self.new_model_distribution(v_model_sampling)
-                all_model[i] = np.random.multivariate_normal(v_dist_mean, v_dist_covariance, 1)
+                sampled_V[i] = np.random.multivariate_normal(v_dist_mean, v_dist_covariance, 1)
             
-            new_model = unsplit_re_im(np.dot(v_model_sampling.model_projection, all_model[i]))
-            #new_model_sample[:] = np.mean(new_model_sample)      # Redundant only
+            new_model = unsplit_re_im(sampled_V[i])
 
             # Use the sampled model to change the x sampling distribution, and take a sample
             v_x_sampling.V_model = new_model
             if self.random_the_long_way:
-                all_x[i] = self.x_random_draw1(v_x_sampling)
+                sampled_x[i] = self.x_random_draw1(v_x_sampling)
             else:
                 x_dist_mean, x_dist_covariance = self.new_x_distribution(v_x_sampling)
-                all_x[i] = np.random.multivariate_normal(x_dist_mean, x_dist_covariance, 1)  
+                sampled_x[i] = np.random.multivariate_normal(x_dist_mean, x_dist_covariance, 1)  
             
-            new_x = unsplit_re_im(restore_x(all_x[i]))
-            
-        self.all_x = all_x
-        self.all_model = all_model
+            new_x = unsplit_re_im(restore_x(sampled_x[i]))
+                        
+        self.sampled_x = sampled_x[(self.niter*self.burn_in)//100:]
+        self.sampled_V = sampled_V[(self.niter*self.burn_in)//100:]
+                
+        self.vis_sampled = copy.deepcopy(self.vis_redcal)    
+        self.best_x, self.best_model = self.bests(method="ml")
+        self.vis_sampled.x = unsplit_re_im(restore_x(self.best_x))
+        self.vis_sampled.V_model = unsplit_re_im(self.best_model)
+        
+        self.x_means = np.mean(sampled_x, axis=0)
+        self.model_means = np.mean(sampled_V, axis=0)
+
     
     
-    def plot_marginals(self):
-        def plot_hist(a, fname, label, sigma_prior, other_vals):
+    def plot_marginals(self, what, cols):
+        def plot_hist(a, fname, label, sigma_prior, other_vals, index):
             hist, bin_edges = np.histogram(a, bins=len(a)//50)
             bins = (bin_edges[1:]+bin_edges[:-1])/2
 
             sigma = np.std(a-np.mean(a))
 
-            plt.clf()
-
+            plt.subplot(rows, cols, index)
             plt.plot(bins, hist)
             for key in other_vals:
                 plt.axvline(other_vals[key][0], color=other_vals[key][1], label=key)
             plt.title(label+" sigma: "+str(round(sigma,2))+" sigma_prior: "+str(round(sigma_prior,2)))
             plt.legend()
-            plt.savefig(fname+".png")
 
-
-        orig_x = split_re_im(self.vis_sim.x)
-        true_x = split_re_im((self.vis_sim_true.g_bar-self.vis_sim.g_bar)/self.vis_sim.g_bar)
-        S_sigmas = np.sqrt(np.diag(self.S))            
-        for i in range(self.all_x.shape[1]):
-            if i%2 == 0: part = "re"
-            else: part = "im"
-            other_vals = {
-                "Orig": ( orig_x[i], "r" ),
-                "True": ( true_x[i], "g" )
-            }
-            print("<img src="+part+"_x_"+str(i//2)+".png width=400>")
+        if what == "x":
+            num_plots = self.sampled_x.shape[1]
+            if num_plots%cols == 0: rows = num_plots//cols
+            else: rows = num_plots//cols+1
             
-            plot_hist(self.all_x[:, i], part+"_x_"+str(i//2), part+"(x_"+str(i//2)+")", S_sigmas[i], other_vals)
+            orig_x = split_re_im(self.vis_redcal.x)
+            true_x = split_re_im((self.vis_true.g_bar-self.vis_redcal.g_bar)/self.vis_redcal.g_bar)
+            S_sigmas = np.sqrt(np.diag(self.S))            
+            for i in range(self.sampled_x.shape[1]):
+                if i%2 == 0: part = "re"
+                else: part = "im"
+                other_vals = {
+                    "Orig": ( orig_x[i], "r" ),
+                    "True": ( true_x[i], "k" )
+                }
+
+                plot_hist(self.sampled_x[:, i], part+"_x_"+str(i//2), part+"(x_"+str(i//2)+")", S_sigmas[i], other_vals, i+1)
+                
+        elif what == "V":
+            true_model = split_re_im(self.vis_true.V_model)
+            redcal_model = split_re_im(self.vis_redcal.V_model)
+            V_mean = np.dot(self.vis_redcal.model_projection, split_re_im(self.V_mean))
+            Cv_sigmas = np.sqrt(np.diag(self.Cv))
+            for i in range(self.sampled_V.shape[1]):
+                if i%2 == 0: part = "re"
+                else: part = "im"
+                other_vals = {
+                    "Redcal" : ( redcal_model[i], "r" ),
+                    "True": ( true_model[i], "k" )
+                }
+                plot_hist(self.sampled_V[:, i], part+"_V_"+str(i//2), part+"(V_"+str(i//2)+")", Cv_sigmas[i], other_vals)
+        else:
+            raise ValueError("Invalid spec for plot_marginals")
+            
+        plt.tight_layout()
         
-        true_model = split_re_im(self.vis_sim_true.V_model)
-        redcal_model = split_re_im(self.vis_sim.V_model)
-        V_mean = np.dot(self.vis_sim.model_projection, split_re_im(self.V_mean))
-        Cv_sigmas = np.sqrt(np.diag(self.Cv))
-        for i in range(self.all_model.shape[1]):
-            if i%2 == 0: part = "re"
-            else: part = "im"
-            other_vals = {
-                "Redcal" : ( redcal_model[i], "r" ),
-                "True": ( true_model[i], "g" )
-            }
-            print("<img src="+part+"_V_"+str(i//2)+".png width=400>")
-            plot_hist(self.all_model[:, i], part+"_V_"+str(i//2), part+"(V_"+str(i//2)+")", Cv_sigmas[i], other_vals)
+    def plot_corner(self):
+        part = lambda i : "re" if i%2==0 else "im"
+        data = np.concatenate((self.sampled_x, self.sampled_V), axis=1)
+        
+        # Plot x dist
+        
+        labels = [ r"$"+part(i)+"(x_"+str(i)+")$" for i in range(self.sampled_x.shape[1]) ]+  \
+                    [ r"$"+part(i)+"(V_"+str(i)+")$" for i in range(self.sampled_V.shape[1]) ]
+        figure = corner.corner(data, labels=labels, show_titles=True, use_math_text=True, labelpad=0.2)
+        
+        axes = np.array(figure.axes).reshape((data.shape[1], data.shape[1]))
+
+        # Loop over the diagonal
+        orig_x = reduce_dof(split_re_im(self.vis_redcal.x))
+        orig_model = split_re_im(self.vis_redcal.V_model)
+        orig = np.concatenate((orig_x, orig_model))
+
+        for i in range(orig.size):
+            #print(i, orig[i])
+            ax = axes[i, i]
+            ax.axvline(orig[i], color="r", linewidth=0.5)
+
+        plt.tight_layout()
+
+        #return figure
+        
+    def plot_trace(self, what):
+        if what == "x": 
+            data = self.sampled_x
+        elif what == "V":
+            data = self.sampled_V
+        else:
+            raise ValueError("plot_trace has invalid specification")
+            
+        for i in range(data.shape[1]):
+            plt.plot(data[:, i])
+            
+        plt.xlabel("Sample iteration")
+        plt.ylabel(what)
+        
+            
+    def print_covcorr(self, threshold=0.0, list_them=False):
+        m = self.corrcoef()
+        part = lambda i : "re" if i%2==0 else "im"
+        labels = [ part(i)+"(x_"+str(i)+")" for i in range(self.sampled_x.shape[1]) ]+  \
+                    [ part(i)+"(V_"+str(i)+")" for i in range(self.sampled_V.shape[1]) ]
+        
+        if not list_them: 
+            print(" "*len(labels[0]), end="\t")
+            for l in labels: print(l, end="\t")
+            print()
+        for i in range(m.shape[0]):                  # m should be square
+            if not list_them: print(labels[i], end="\t")
+            for j in range(m.shape[1]):
+                if abs(m[i, j]) > threshold:
+                    if list_them: 
+                        if i > j: print(labels[i]+","+labels[j], "\t", np.round(m[i, j], 2))
+                    else: print(np.round(m[i, j], 2), end="\t")
+                else: 
+                    if not list_them: 
+                        print("-----", end="\t")
+            if not list_them: print()
+            
+    def plot_covcorr(self, threshold=0.0):
+        m = self.corrcoef()
+        np.fill_diagonal(m, 0)
+        m[np.triu_indices(m.shape[0])] = 0
+        m[np.logical_and(m>-threshold,m<threshold)] = 0
+
+        
+        plt.subplot(2, 2, 1)
+        plt.imshow(m, cmap="RdBu", aspect="auto")
+        nx = self.sampled_x.shape[1]
+        nv = self.sampled_V.shape[1]
+        x=plt.xticks([nx//2, nx+nv//2], ["X", "V"], fontsize=15)
+        x=plt.yticks([nx//2, nx+nv//2], ["X", "V"], fontsize=15)
+        plt.plot([-0.5, nx-0.5], [nx-0.5, nx-0.5], "k", linewidth=0.6)
+        plt.plot([nx-0.5, nx-0.5], [-0.5, nx-0.5],  "k", linewidth=0.6)
+        plt.colorbar()
+        plt.title("Correlation matrix")
+        
+        
+        plt.subplot(2, 2, 2)
+        plt.plot(range(self.sampled_x.shape[1]), self.x_means, label="Means", linewidth=0.6)
+        plt.plot(range(self.sampled_x.shape[1]), self.best_x, label="MLs", linewidth=0.6)
+        x=plt.xticks(range(0, self.sampled_x.shape[1], 2), range(0, self.sampled_x.shape[1], 2))
+        plt.xlabel("Order")
+        plt.legend()
+        plt.title("Best values x split real/imag in order of correlation matrix")
+        
+        plt.subplot(2, 2, 3)
+        plt.plot(range(self.sampled_V.shape[1]), self.model_means, label="Means", linewidth=0.6)
+        plt.plot(range(self.sampled_V.shape[1]), self.best_model, label="MLs", linewidth=0.6)
+        plt.xlabel("Order")
+        plt.legend()
+        plt.title("Best values V split real/imag in order of correlation matrix")
+
+        
+        plt.tight_layout()
+        
+
+    def plot_results(self): 
+        plt.subplot(2, 1, 1)
+        order = np.abs(self.vis_true.V_model).argsort()
+        plt.plot(np.abs(self.vis_true.V_model)[order], 
+                 np.abs(self.vis_true.V_model)[order], "k", linewidth=0.6,  label="1:1")
+        plt.plot(np.abs(self.vis_true.V_model)[order], 
+                 np.abs(self.vis_redcal.get_calibrated_visibilities())[order], "r", linewidth=0.6,  label="Redcal")
+        plt.plot(np.abs(self.vis_true.V_model)[order], 
+                 np.abs(self.vis_sampled.get_calibrated_visibilities())[order], "b", linewidth=0.6,  label="Sampled")
+        plt.legend()
+        plt.xlabel("V_true amplitude")
+        plt.ylabel("Amplitude")
+        plt.title("Calibrated visibilities (Amplitude)")
+        
+        plt.subplot(2, 1, 2)
+        order = np.angle(self.vis_true.V_model).argsort()
+        plt.plot(np.angle(self.vis_true.V_model.astype(np.complex64))[order], 
+                 np.angle(self.vis_true.V_model.astype(np.complex64))[order], "k", linewidth=0.6,  label="1:1")
+        plt.plot(np.angle(self.vis_true.V_model.astype(np.complex64))[order], 
+                 np.angle(self.vis_redcal.get_calibrated_visibilities().astype(np.complex64))[order], "r", linewidth=0.6,  label="Redcal")
+        plt.plot(np.angle(self.vis_true.V_model.astype(np.complex64))[order], 
+                 np.angle(self.vis_sampled.get_calibrated_visibilities().astype(np.complex64))[order], "b", linewidth=0.6,  label="Sampled")
+        plt.legend()
+        plt.xlabel("V_true phase")
+        plt.ylabel("Phase")
+        plt.title("Calibrated visibilities (Phase)")
+        plt.tight_layout()
+        
+    def plot_gains(self, sigma=3):
+        
+        def get_g_error_bars():
+            SIG = 3
+            BOTTOM = 0
+            TOP = 1
+            
+            sampled_gains = np.zeros((self.sampled_x.shape[0], self.nant))
+            for i in range(self.sampled_x.shape[0]):
+                x_vec = unsplit_re_im(restore_x(self.sampled_x[i]))
+                sampled_gains[i] = self.vis_redcal.g_bar*(1+new_x)
+                                 
+            
+            g_limits_amp = np.zeros((self.sampled_x.shape[1], 2))    # 2 because mean/ml
+            g_limits_phase = np.zeros((self.sampled_x.shape[1], 2))
+            
+            # Get the error bars. For each g, get the range based on SIG sigma.
+            for i in range(self.sampled_x.shape[1]):       # Loop over antennas
+                m = np.mean(np.abs(sampled_gains[:, i]))
+                s = np.std(np.abs(sampled_gains[:, i]))
+                g_limits_amp[i, BOTTOM] = m-SIG*s
+                g_limits_amp[i, TOP] = m+SIG*s
+                
+                m = np.mean(np.angle(sampled_gains[:, i]))
+                s = np.std(np.angle(sampled_gains[:, i]))
+                g_limits_phase[i, BOTTOM] = m-SIG*s
+                g_limits_phase[i, TOP] = m+SIG*s
+                
+                
+            return g_limits_amp, g_limits_phase
+        
+        
+        #g_bar = self.v_sampled.g_bar
+        #print(get_x_error_bars())
+        #exit()
+        
+        error_amp, error_phase = get_g_error_bars()
+        
+        plt.subplot(2, 1, 1)
+
+        # 1. V true. The gains are 1? Can't remember why
+        plt.plot(range(self.vis_redcal.nant), np.abs(self.vis_true.get_antenna_gains()), "k", label="g_true")
+
+        # 2. The redcal gains as they are given to us by redcal.
+        plt.plot(range(self.vis_redcal.nant), np.abs(self.vis_redcal.get_antenna_gains()), "r", label="g_redcal")
+
+        # 3. Sampled gains based on sampled x. 
+        plt.plot(range(self.vis_redcal.nant), np.abs(self.vis_sampled.get_antenna_gains()), "b", label="g_sampled")
+        assert error_amp.shape[0] == self.vis_redcal.nant
+        for i in range(error_amp.shape[0]):
+            plt.plot([i, i], [ error_amp[i][0], error_amp[i][1] ], "lightblue")
+        plt.legend()
+        plt.title("Gain amplitudes")
+        plt.xlabel("Antenna")
+        plt.ylabel("Amplitude")
+        plt.xticks(range(self.nant()), range(self.nant()))
+
+        plt.subplot(2, 1, 2)
+
+        # 1. V true. The gains are 1? Can't remember why
+        plt.plot(range(self.vis_redcal.nant), np.angle(self.vis_true.get_antenna_gains()), "k", label="g_true")
+
+        # 2. The redcal gains as they are given to us by redcal.
+        plt.plot(range(self.vis_redcal.nant), np.angle(self.vis_redcal.get_antenna_gains()), "r", label="g_redcal")
+
+        # 3. The sampled gains, actually x is sampled. 
+        plt.plot(range(self.vis_redcal.nant), np.angle(self.vis_sampled.get_antenna_gains()), "b", label="g_sampled")
+        assert error_phase.shape[0] == self.vis_redcal.nant
+        for i in range(error_phase.shape[0]):
+            plt.plot([i, i], [ error_phase[i][0], error_phase[i][1] ], "lightblue")
+        plt.legend()
+        plt.title("Gain phases")
+        plt.xlabel("Antenna")
+        plt.ylabel("Phase (rad)")
+        plt.xticks(range(self.nant()), range(self.nant()))
+        plt.tight_layout()
+
+
+        
+    def cov(self):
+        data = np.concatenate((self.sampled_x, self.sampled_V), axis=1)
+
+        return np.cov(data, rowvar=False)
+    
+    def corrcoef(self):
+        data = np.concatenate((self.sampled_x, self.sampled_V), axis=1)
+
+        return np.corrcoef(data, rowvar=False) 
             
     def standard_random_draw(self, size):
         mean = np.zeros(size)
@@ -139,22 +373,22 @@ class Sampler:
         return m.real
     
     def test_distributions(self):
-        all_x = np.zeros((self.niter, self.vis_sim.nant*2-1))       # -1 because there'll be a missing imaginary value
-        all_model = np.zeros((self.niter, self.V_mean.size*2))
+        sampled_x = np.zeros((self.niter, self.vis_redcal.nant*2-1))       # -1 because there'll be a missing imaginary value
+        sampled_V = np.zeros((self.niter, self.V_mean.size*2))
 
         for i in range(self.niter):
             if self.random_the_long_way:
-                all_x[i] = self.x_random_draw(self.vis_sim)
-                all_model[i] = self.V_random_draw(self.vis_sim)
+                sampled_x[i] = self.x_random_draw(self.vis_redcal)
+                sampled_V[i] = self.V_random_draw(self.vis_redcal)
             else:
-                x_dist_mean, x_dist_covariance = self.new_x_distribution(self.vis_sim)
-                all_x[i] = np.random.multivariate_normal(x_dist_mean, x_dist_covariance, 1)  
+                x_dist_mean, x_dist_covariance = self.new_x_distribution(self.vis_redcal)
+                sampled_x[i] = np.random.multivariate_normal(x_dist_mean, x_dist_covariance, 1)  
 
-                v_dist_mean, v_dist_covariance = self.new_model_distribution(self.vis_sim)
-                all_model[i] = np.random.multivariate_normal(v_dist_mean, v_dist_covariance, 1)    
+                v_dist_mean, v_dist_covariance = self.new_model_distribution(self.vis_redcal)
+                sampled_V[i] = np.random.multivariate_normal(v_dist_mean, v_dist_covariance, 1)    
                 
-        self.all_x = all_x
-        self.all_model = all_model
+        self.sampled_x = sampled_x
+        self.sampled_V = sampled_V
 
                            
     def x_random_draw(self, v):
@@ -223,7 +457,7 @@ class Sampler:
         # If S is set to None and the model is never changed then
         # the mean of the x distribution will be the GLS solution.
 
-        A = reduce_dof(generate_proj(v.g_bar, v.V_model))  # depends on model
+        A = reduce_dof(generate_proj(v.g_bar, v.project_model()))  # depends on model
         #A = reduce_dof(generate_proj1(v.nvis, v.nant))
         N = np.diag(split_re_im(v.obs_variance))
         d = split_re_im(v.get_reduced_observed())                       # depends on model
@@ -346,17 +580,17 @@ class Sampler:
 
 
         if method == "mean":
-            best_x = np.array([ np.mean(self.all_x[:, i]) for i in range(self.all_x.shape[1]) ])
-            best_model = np.array([ np.mean(self.all_model[:, i]) for i in range(self.all_model.shape[1]) ])    
+            best_x = np.array([ np.mean(self.sampled_x[:, i]) for i in range(self.sampled_x.shape[1]) ])
+            best_model = np.array([ np.mean(self.sampled_V[:, i]) for i in range(self.sampled_V.shape[1]) ])    
 
         elif method == "hist":
-            best_x = np.array([ peak(self.all_x[:, i]) for i in range(self.all_x.shape[1]) ])
-            best_model = np.array([ peak(self.all_model[:, i]) for i in range(self.all_model.shape[1]) ])   
+            best_x = np.array([ peak(self.sampled_x[:, i]) for i in range(self.sampled_x.shape[1]) ])
+            best_model = np.array([ peak(self.sampled_V[:, i]) for i in range(self.sampled_V.shape[1]) ])   
 
         elif method == "ml":
-            where_best, _ = self.fit_stat()
-            best_x = self.all_x[where_best]
-            best_model = self.all_model[where_best]
+            where_best = self.fit_stat()
+            best_x = self.sampled_x[where_best]
+            best_model = self.sampled_V[where_best]
 
         else:
             raise ValueError("Invalid method")
@@ -365,35 +599,43 @@ class Sampler:
     
     def fit_stat(self):
         
-        vv = copy.deepcopy(self.vis_sim)
-        vv.g_bar = vv.initial_vals.g_bar
-        vv.V_model = vv.initial_vals.g_bar
-
+        vv = copy.deepcopy(self.vis_redcal)
+        
         best = 1e39
         where_best = 0
-        for i in range(self.all_x.shape[0]):
-            vv.x = unsplit_re_im(restore_x(self.all_x[i]))
-            vv.V_model = unsplit_re_im(np.dot(vv.model_projection, self.all_model[i]))
-            chi2 = vv.get_quality()
-            if chi2 < best:
+        for i in range(self.sampled_x.shape[0]):    
+            vv.x = unsplit_re_im(restore_x(self.sampled_x[i]))
+            vv.V_model = unsplit_re_im(self.sampled_V[i])
+            lh = vv.get_likelihood()
+            if lh < best:
                 where_best = i
-                best = chi2
+                best = lh
+                
 
-        return where_best, best
+        return where_best
+    
+    
 
 
-        
 if __name__ == "__main__":
-    sampler = Sampler(seed=99, niter=10000, random_the_long_way=False)
-    sampler.load_nr_sim("/scratch2/users/hgarsden/catall/calibration_points/viscatBC_stretch0.02", remove_redundancy=True, initial_solve_for_x=False)
 
-    #sampler.load_sim(4)
+    
+    sampler = Sampler(seed=99, niter=1000, random_the_long_way=False)
+    sampler.load_nr_sim("/scratch3/users/hgarsden/catall/calibration_points/viscatBC", 
+                        remove_redundancy=False, initial_solve_for_x=False)
     S = np.eye(sampler.nant()*2-1)*0.01
-    V_mean = sampler.vis_sim.group_models()
+    V_mean = sampler.vis_redcal.V_model
     Cv = np.eye(V_mean.size*2)
-    sampler.set_S_and_V(S, V_mean, Cv)
+    sampler.set_S_and_V_prior(S, V_mean, Cv)
+    
     sampler.run()
-    sampler.plot_marginals()
-    _, stat = sampler.fit_stat()
-    print(stat, sampler.vis_sim.get_quality())
+    sampler.plot_covcorr()
+    exit()
 
+    S = np.eye(sampler.nant()*2-1)*0.01
+    V_mean = sampler.vis_redcal.V_model
+    Cv = np.eye(V_mean.size*2)
+    sampler.set_S_and_V_prior(S, V_mean, Cv)
+    sampler.run()
+    
+    sampler.plot_gains()
