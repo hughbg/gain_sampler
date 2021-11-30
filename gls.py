@@ -68,8 +68,9 @@ def generate_proj1(nvis, nant):
     return proj
 
 def reduce_dof(p):
-    
-    return np.delete(p, p.shape[1]-1, axis=1)
+    if p.ndim == 2:
+        return np.delete(p, p.shape[1]-1, axis=1)
+    else: return np.delete(p, p.size-1)
     
 """
     best = 1e9

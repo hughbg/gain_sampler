@@ -59,12 +59,9 @@ class VisSim:
             If True then V_model is made the same for all baselines.
          
         """
-        
-
-
 
         # check inputs 
-        if nant <= 2 or vis_model_sigma <= 0 or gain_sigma <= 0 or x_sigma <= 0 \
+        if nant <= 2 or vis_model_sigma < 0 or gain_sigma < 0 or x_sigma < 0 \
                 or level not in [ "approx", "exact" ]:
             raise ValueError("VisSim: Invalid input value")
             
@@ -100,8 +97,8 @@ class VisSim:
         else:
             self.redundant_groups = [ [bl] for bl in range(nvis) ]
 
-        self.V_obs = self.get_simulated_visibilities()
         self.model_projection = self.get_model_projection()
+        self.V_obs = self.get_simulated_visibilities()
         
         self.initial_vals = self.InitialVals()
         self.initial_vals.V_model = self.V_model
@@ -122,17 +119,18 @@ class VisSim:
         """
 
         V = np.empty(self.nvis, dtype=type(self.V_model))
+        V_model = self.project_model()
         k = 0
         for i in range(self.nant):
             for j in range(i+1, self.nant):
                 V[k] = calc_visibility(self.level, self.g_bar[i], self.g_bar[j], 
-                                       self.V_model[k], self.x[i], self.x[j])
+                                       V_model[k], self.x[i], self.x[j])
                 if show_working:
                     if self.level == "approx":
-                        print(self.V_obs[k], "=?", "[", V[k], "]", self.V_model[k], "x", self.g_bar[i], "x", np.conj(self.g_bar[j]), 
+                        print(self.V_obs[k], "=?", "[", V[k], "]", V_model[k], "x", self.g_bar[i], "x", np.conj(self.g_bar[j]), 
                             "(1 +", self.x[i], "+", np.conj(self.x[j]), ")")
                     else:
-                        print(self.V_obs[k], "=?", "[", V[k], "]", self.V_model[k], "x", self.g_bar[i], "x", np.conj(self.g_bar[j]), 
+                        print(self.V_obs[k], "=?", "[", V[k], "]", V_model[k], "x", self.g_bar[i], "x", np.conj(self.g_bar[j]), 
                             "( 1 +", self.x[i], ") x ( 1 +", np.conj(self.x[j]), "))")
 
                 k += 1
@@ -153,7 +151,7 @@ class VisSim:
 
         V_sim = self.get_simulated_visibilities()    
         
-        return V_sim/self.V_model
+        return V_sim/self.project_model()
 
     def get_antenna_gains(self):
         """
@@ -189,11 +187,12 @@ class VisSim:
             The reduced visibilities, indexed by baseline.
         """
         
+        V_model = self.project_model()
         V = np.empty(self.V_obs.size, dtype=type(self.V_obs))
         k = 0
         for i in range(self.nant):
             for j in range(i+1, self.nant):     
-                V[k] = self.V_obs[k]-self.V_model[k]*self.g_bar[i]*np.conj(self.g_bar[j])
+                V[k] = self.V_obs[k]-V_model[k]*self.g_bar[i]*np.conj(self.g_bar[j])
                 k += 1
         return V
     
@@ -215,10 +214,11 @@ class VisSim:
         """
         
         V = np.empty(self.V_obs.size, dtype=type(self.V_obs))
+        V_model = self.project_model()
         k = 0
         for i in range(self.nant):
             for j in range(i+1, self.nant):
-                V[k] = self.V_obs[k]/self.V_model[k]/(self.g_bar[i]*np.conj(self.g_bar[j]))-1
+                V[k] = self.V_obs[k]/V_model[k]/(self.g_bar[i]*np.conj(self.g_bar[j]))-1
                 k += 1
         return V
  
@@ -230,23 +230,18 @@ class VisSim:
         
         return self.V_obs/self.get_baseline_gains()
     
-    def fold_x_into_model(self):
-        k = 0
-        for i in range(self.nant):
-            for j in range(i+1, self.nant):     
-                self.V_model[k] = self.V_model[k]*(1+self.x[i]+np.conj(self.x[j]))
-                k += 1
-        self.x[:] = 0j
 
-
-    def get_quality(self):
+    def get_unnormalized_likelihood(self, unity_N=False):
         """
         Calculate the RMS of the real/imag values from get_diff_obs_sim()
         """
 
-        dy = (self.V_obs-self.get_simulated_visibilities())
-
-        return np.abs(np.sqrt(np.dot(dy, np.conj(dy))))
+        dy = split_re_im(self.V_obs-self.get_simulated_visibilities())
+        if unity_N:
+            N_inv = np.eye(self.nvis*2)
+        else: 
+            N_inv = np.linalg.inv(np.diag(split_re_im(self.obs_variance)))
+        return np.exp(-0.5*np.dot(dy, np.dot(N_inv, dy)))
     
     def get_model_projection(self):
         mapping = self.map_to_redundant_group()
@@ -256,6 +251,11 @@ class VisSim:
             P[i*2+1][mapping[i]*2+1] = 1  
             
         return P
+    
+    def project_model(self):
+        V_model = split_re_im(self.V_model)
+        V_model = np.dot(self.model_projection, V_model)
+        return unsplit_re_im(V_model)
 
 
     def get_chi2(self):
@@ -285,19 +285,7 @@ class VisSim:
         for red in v.redundant_groups:
             for bl in red:
                 print(mapping[bl], bl, v.V_model[bl])
-                
-    def check_redundant_models(self):
-        for red in self.redundant_groups:
-            for bl in red[1:]:
-                assert self.V_model[bl] == self.V_model[red[0]]
-                
-    def group_models(self):
-        V = np.zeros(len(self.redundant_groups), dtype=type(self.V_model[0]))
-        for i in range(len(self.redundant_groups)):
-            V[i] = self.V_model[self.redundant_groups[i][0]]
-                     
-        return V
-                
+                                
     def print(self):
         print("V_model", self.V_model)
         print("g_bar", self.g_bar)
@@ -316,12 +304,14 @@ class VisCal(VisSim):
     """
     # Warning: hickle file needed
     # TODO: make these steps separate functions
-    def __init__(self, file_root, time=0, freq=0, remove_redundancy=False, level="approx"):
+    def __init__(self, file_root, time=0, freq=0, remove_redundancy=False, degeneracy_fix=False, level="approx"):
         """
         file_root: str
             The file path referring to a non-redundant-pipeline simulation "case". 
             Use that path to select files from the simulation based on their extension.
         """
+        
+        
         # Get V_obs from last file generated by analyse_sims.py 
         
         fname = file_root+"_g.uvh5"
@@ -341,7 +331,7 @@ class VisCal(VisSim):
         nvis = len(bl_to_ants)
 
         # Load V_obs
-        V = np.zeros(nvis, dtype=np.complex64)
+        V = np.zeros(nvis, dtype=type(uvdata.get_data(bl_to_ants[0][0], bl_to_ants[0][1], "XX")[time][freq]))
         for i, bl in enumerate(bl_to_ants):
             V[i] = uvdata.get_data(bl[0], bl[1], "XX")[time][freq]
 
@@ -356,7 +346,7 @@ class VisCal(VisSim):
         assert len(cal["v_omnical"].keys()) == len(baseline_groups), \
                 "Number of baseline groups: "+str(len(baseline_groups))+ \
                 " Number of model groups: "+str(len(cal["v_omnical"].keys()))
-        V_model = np.zeros(nvis, dtype=np.complex64)
+        V_model = np.zeros(nvis, dtype=type(V[0]))
         for key in cal["v_omnical"].keys():
             baseline = (key[0], key[1])
             
@@ -378,12 +368,25 @@ class VisCal(VisSim):
                     V_model[i] = np.conj(cal["v_omnical"][key][time][freq])
 
                 redundant_groups[group_index].append(i)
-        
+                
+        assert np.min(np.abs(V_model)) > 0, "Model has missing values"
+
+        # Check that the models in the redundant groups are all equal
+        for red in redundant_groups:
+            for bl in red[1:]:
+                assert V_model[bl] == V_model[red[0]]
+                
+        # Now we are going to fiddle with the redundancy and compact the 
+        # list of models if there is redundancy
+
         if remove_redundancy: 
             redundant_groups = [ [bl] for bl in range(nvis) ]
+        else:
+            new_V_model = np.zeros(len(redundant_groups), dtype=type(V_model[0]))
+            for i in range(len(redundant_groups)):
+                new_V_model[i] = V_model[redundant_groups[i][0]]
+            V_model = new_V_model
             
-
-        assert np.min(np.abs(V_model)) > 0, "Model has missing values"
 
         """
         # Get the weights used by calibration
@@ -403,32 +406,45 @@ class VisCal(VisSim):
         print("Get noise from", fname)
         uvdata = UVData()
         uvdata.read_uvh5(fname)
-        noise = np.zeros(nvis, dtype=np.complex64)
+        noise = np.zeros(nvis, dtype=type(V[0]))
         for i, bl in enumerate(bl_to_ants):
             noise[i] = uvdata.get_data(bl[0], bl[1], "XX")[time][freq]
 
         # Get the gains generated from calibration
+        g_bar = np.zeros(nant, dtype=type(V[0]))
+        if degeneracy_fix:
+            fname = file_root+"_g_new.calfits"
+            print("Get gains from", fname)
+            uvc = UVCal()
+            uvc.read_calfits(fname)
+            for i in range(nant):
+                # The data for each gain is in shape (nfreq, ntime)
+                # Yes it's the other way round to cal above
+                g_bar[i] = uvc.get_gains(i)[freq, time]
+        else:
+            # Get results from cal (g_omnical).
+            assert len(cal["g_omnical"].keys()) == nant
+            for key in cal["g_omnical"]:
+                # Key is of form (0, 'Jee'). The data for each key is in shape (ntime, nfreq)
+                ant = key[0]
+                g_bar[ant] = cal["g_omnical"][key][time][freq]
 
-        fname = file_root+"_g_new.calfits"
-        print("Get gains from", fname)
-        uvc = UVCal()
-        uvc.read_calfits(fname)
-        g_bar = np.zeros(nant, dtype=np.complex64)
-        for i in range(nant):
-            g_bar[i] = uvc.get_gains(i)[0, 0]
             
+        self.file_root = file_root
+        self.time = time
+        self.freq = freq
+
         self.level = level
         self.nant = nant
         self.nvis = nvis
         self.V_obs = V
         self.V_model = V_model
         self.g_bar = g_bar
-        self.x = np.zeros(g_bar.size, dtype=np.complex64)
+        self.x = np.zeros(g_bar.size, dtype=type(g_bar[0]))
         # The noise is standard deviation of re/im parts for all visibilities.
         # Convert these values into variances.
         self.obs_variance = unsplit_re_im(split_re_im(noise)**2)
         self.redundant_groups = redundant_groups
-        self.check_redundant_models()
         self.bl_to_ants = bl_to_ants
         self.model_projection = self.get_model_projection()
         
@@ -437,7 +453,7 @@ class VisCal(VisSim):
         self.initial_vals.V_obs = self.V_obs
         self.initial_vals.g_bar = self.g_bar
         self.initial_vals.x = self.x
-
+        
 
 
 class VisTrue(VisSim):
@@ -465,9 +481,12 @@ class VisTrue(VisSim):
         nvis = len(bl_to_ants)
 
         # Load model
-        V_model = np.zeros(nvis, dtype=np.complex64)
+        V_model = np.zeros(nvis, dtype=type(uvdata.get_data(bl_to_ants[0][0], bl_to_ants[0][1], "XX")[time][freq]))
         for i, bl in enumerate(bl_to_ants):
             V_model[i] = uvdata.get_data(bl[0], bl[1], "XX")[time][freq]
+            
+        # Wipe out the redundant groups because the vis are not the same in them
+        redundant_groups = [ [bl] for bl in range(nvis) ]
 
         # Get true gains
 
@@ -475,7 +494,7 @@ class VisTrue(VisSim):
         print("Get true gains from", fname)
         uvc = UVCal()
         uvc.read_calfits(fname)
-        g_bar = np.zeros(nant, dtype=np.complex64)
+        g_bar = np.zeros(nant, dtype=type(V_model[0]))
         for i in range(nant):
             g_bar[i] = uvc.get_gains(i)[0, 0]
 
@@ -491,30 +510,20 @@ class VisTrue(VisSim):
                 "Data does not contain expected number of baselines"
 
         # Load V_obs
-        V = np.zeros(nvis, dtype=np.complex64)
+        V = np.zeros(nvis, dtype=type(V_model[0]))
         for i, bl in enumerate(bl_to_ants):
             V[i] = uvdata.get_data(bl[0], bl[1], "XX")[time][freq]
             
-        
 
         self.level = level
         self.nant = nant
         self.nvis = nvis
         self.g_bar = g_bar
         self.V_model = V_model
-        self.x = np.zeros(g_bar.size, dtype=np.complex64)
+        self.x = np.zeros(g_bar.size, dtype=type(g_bar[0]))
         self.V_obs = V
-        self.obs_variance = np.full(V.size, 1)
-        self.redundant_groups, _, _ = uvdata.get_redundancies()
-        # Turn the baselines into our index. The redundant groups are in a
-        # different order to VisCal
-        for i in range(len(self.redundant_groups)):
-            for j in range(len(self.redundant_groups[i])):
-                ants = uvdata.baseline_to_antnums(self.redundant_groups[i][j])
-                if ants[0] != ants[1]:
-                    our_baseline = bl_to_ants.index(ants)
-                    self.redundant_groups[i][j] = our_baseline
-        del self.redundant_groups[0]      # autocorrelations
+        self.obs_variance = unsplit_re_im(np.full(V.size*2, 1))
+        self.redundant_groups = redundant_groups
 
         self.bl_to_ants = bl_to_ants
         self.model_projection = self.get_model_projection()
@@ -641,13 +650,6 @@ def select_no_redundancy(vis):
     return new_vis
 
 
-
-
-    
-        
-
-
-
 def perturb_vis(vis, vis_perturb_percent):
     """
     vis_perturb_percent: Each V value is increased or
@@ -666,40 +668,33 @@ def perturb_vis(vis, vis_perturb_percent):
             raise ValueError("vis_perturb_percent is < 0")
         if vis_perturb_percent > 0:
             # Perturb the orignal vis
-            vals = split_re_im(new_vis.V_obs)
-            choices = np.random.random(size=len(vals))-0.5
-            new_vis.V_obs = unsplit_re_im(np.where(choices <= 0, vals*(1-vis_perturb_percent/100.0), 
-                                                   vals*(1+vis_perturb_percent/100.0)))
+            #vals = split_re_im(new_vis.V_obs)
+            #choices = np.random.random(size=len(vals))-0.5
+            #new_vis.V_obs = unsplit_re_im(np.where(choices <= 0, vals*(1-vis_perturb_percent/100.0), 
+            #                                       vals*(1+vis_perturb_percent/100.0)))
+            for i in range(new_vis.V_obs.size):
+                new_vis.V_obs[i] = complex(new_vis.V_obs[i].real+np.random.normal(scale=100), new_vis.V_obs[i].imag+np.random.normal(scale=100))
 
     return new_vis
 
 
 if __name__ == "__main__":
-    from gls import generate_proj1
     
+    sampler = Sampler(seed=99, niter=1000, random_the_long_way=False)
+    sampler.load_nr_sim("/scratch3/users/hgarsden/catall/calibration_points/viscatBC", 
+                    freq=0, time=0, remove_redundancy=False, initial_solve_for_x=False)
+    print(sampler.vis_true.get_unnormalized_likelihood(unity_N=True))
+    
+    v1 = split_re_im(v.V_obs)
+    v2 = split_re_im(vis)
+    
+    print(-0.5*np.sum((v1-v2)**2))
+    exit()
 
     v = VisCal("/scratch2/users/hgarsden/catall/calibration_points/viscatBC_stretch0.02", time=0, freq=0)
-
-    mapping = v.map_to_redundant_group()
-    group_models = v.group_models()                 
-    
-    A = np.zeros((v.nvis*2, len(v.redundant_groups)*2))
-    for i in range(A.shape[0]//2):      # This will scan baselines
-        A[i*2][mapping[i]*2] = 1
-        A[i*2+1][mapping[i]*2+1] = 1  
-    
-    x = np.dot(A, split_re_im(group_models))
-    all = split_re_im(v.V_model)
-    for i in range(v.nvis*2):
-        print(all[i], x[i])
+    v.fix_degeneracies()
     exit()
-    v = select_redundant_group(v, 1)
-    print(v.redundant_groups)
-
-    for rg in v.redundant_groups:
-        for i in rg: print(v.V_model[i], v.V_obs[i])
-        print("--")
-    exit()
+  
     v = VisSim(4, level="approx")
     v.print()
     v.get_baseline_gains()

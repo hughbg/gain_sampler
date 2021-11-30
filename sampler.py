@@ -89,12 +89,16 @@ class Sampler:
                         
         sampled_x = sampled_x[(self.niter*self.burn_in)//100:]
         sampled_V = sampled_V[(self.niter*self.burn_in)//100:]
+        sampled_gains = np.zeros((sampled_x.shape[0], sampled_x.shape[1]+1))
+        for i in range(sampled_x.shape[0]):
+            x = unsplit_re_im(restore_x(sampled_x[i]))
+            sampled_gains[i] = split_re_im(self.vis_redcal.g_bar*(1+x))  
         
         self.samples = {
             "x" : sampled_x,
+            "g" : sampled_gains,
             "V" : sampled_V
         }
-        
         
         # Create an object containing the best fit
         self.vis_sampled = copy.deepcopy(self.vis_redcal)    
@@ -102,7 +106,7 @@ class Sampler:
         self.vis_sampled.x = unsplit_re_im(restore_x(best_vals["x"]))
         self.vis_sampled.V_model = unsplit_re_im(best_vals["V"])  
     
-    def plot_marginals(self, parameter, cols, which):
+    def plot_marginals(self, parameter, cols, which=[ "True", "Redcal", "Sampled" ]):
         def plot_hist(a, fname, label, sigma_prior, other_vals, index):
             hist, bin_edges = np.histogram(a, bins=len(a)//50)
             bins = (bin_edges[1:]+bin_edges[:-1])/2
@@ -123,60 +127,57 @@ class Sampler:
             assert w in [ "True", "Redcal", "Sampled" ], "Invalid results to plot: "+str(w)
         
         if parameter == "x":
-            x_samples = self.assemble_data(["x"])["data"]
-            num_plots = x_samples.shape[1]
+            num_plots = self.samples["x"].shape[1]
             if num_plots%cols == 0: rows = num_plots//cols
             else: rows = num_plots//cols+1
             
             true_x = (split_re_im(self.vis_true.g_bar)/split_re_im(self.vis_redcal.g_bar)-1)
             redcal_x = split_re_im(self.vis_redcal.x)
             sampled_x = split_re_im(self.vis_sampled.x)
-            for i in range(x_samples.shape[1]):
+            for i in range(self.samples["x"].shape[1]):
                 if i%2 == 0: part = "re"
                 else: part = "im"
                 other_vals = {}
-                if "True" in which: other_vals["True"] = ( true_x[i], "gold" )
+                if "True" in which: other_vals["True"] = ( true_x[i], "green" )
                 if "Redcal" in which: other_vals["Redcal"] = ( redcal_x[i], "red" )
                 if "Sampled" in which: other_vals["Sampled"] = ( sampled_x[i], "blue" )
 
-                plot_hist(x_samples[:, i], part+"_x_"+str(i//2), part+"(x_"+str(i//2)+")", None, other_vals, i+1)
+                plot_hist(self.samples["x"][:, i], part+"_x_"+str(i//2), part+"(x_"+str(i//2)+")", None, other_vals, i+1)
         elif parameter == "g":
-            g_samples = self.assemble_data(["g"])["data"]
-            num_plots = g_samples.shape[1]
+            num_plots = self.samples["g"].shape[1]
             if num_plots%cols == 0: rows = num_plots//cols
             else: rows = num_plots//cols+1
             
             true_g = split_re_im(self.vis_true.g_bar)
             redcal_g = split_re_im(self.vis_redcal.g_bar)
             sampled_g = split_re_im(self.vis_sampled.get_antenna_gains())
-            for i in range(g_samples.shape[1]):
+            for i in range(self.samples["g"].shape[1]):
                 if i%2 == 0: part = "re"
                 else: part = "im"
                 other_vals = {}
-                if "True" in which: other_vals["True"] = ( true_g[i], "gold" )
+                if "True" in which: other_vals["True"] = ( true_g[i], "green" )
                 if "Redcal" in which: other_vals["Redcal"] = ( redcal_g[i], "red" )
                 if "Sampled" in which: other_vals["Sampled"] = ( sampled_g[i], "blue" )
 
-                plot_hist(g_samples[:, i], part+"_g_"+str(i//2), part+"(g_"+str(i//2)+")", None, other_vals, i+1)
+                plot_hist(self.samples["g"][:, i], part+"_g_"+str(i//2), part+"(g_"+str(i//2)+")", None, other_vals, i+1)
                 
         elif parameter == "V":
-            V_samples = self.assemble_data(["V"])["data"]
-            num_plots = V_samples.shape[1]
+            num_plots = self.samples["V"].shape[1]
             if num_plots%cols == 0: rows = num_plots//cols
             else: rows = num_plots//cols+1
             
             true_V = split_re_im(self.vis_true.V_model)
             redcal_V = split_re_im(self.vis_redcal.V_model)
             sampled_V = split_re_im(self.vis_sampled.V_model)
-            for i in range(V_samples.shape[1]):
+            for i in range(self.samples["V"].shape[1]):
                 if i%2 == 0: part = "re"
                 else: part = "im"
                 other_vals = {}
-                if "True" in which: other_vals["True"] = ( true_V[i], "gold" )
+                if "True" in which: other_vals["True"] = ( true_V[i], "green" )
                 if "Redcal" in which: other_vals["Redcal"] = ( redcal_V[i], "red" )
                 if "Sampled" in which: other_vals["Sampled"] = ( sampled_V[i], "blue" )
 
-                plot_hist(V_samples[:, i], part+"_V_"+str(i//2), part+"(V_"+str(i//2)+")", None, other_vals, i+1)
+                plot_hist(self.samples["V"][:, i], part+"_V_"+str(i//2), part+"(V_"+str(i//2)+")", None, other_vals, i+1)
         else:
             raise ValueError("Invalid spec for plot_marginals")
             
@@ -185,8 +186,7 @@ class Sampler:
         
     def plot_corner(self, parameters):
         assert len(parameters) == 2, "corner plot needs x,V or g,V"
-        
-        data_packet = self.assemble_data(parameters)
+        data_packet = self.assemble_data(parameters)       # Puts both together
         
         part = lambda i : "re" if i%2==0 else "im"
        
@@ -235,12 +235,13 @@ class Sampler:
         
     def plot_trace(self, parameter):
         assert isinstance(parameter, str), "trace parameter must be string"
+        assert parameter in [ "x", "g", "V" ], "Unknown parameter: "+parameter
         
-        data_packet = self.assemble_data([parameter])
+        data = self.samples[parameter]
             
         sample_range = np.arange((self.burn_in*self.niter)//100, self.niter, 1)
-        for i in range(data_packet["data"].shape[1]):
-            plt.plot(sample_range, data_packet["data"][:, i])
+        for i in range(data.shape[1]):
+            plt.plot(sample_range, data[:, i])
             
         plt.xlabel("Sample iteration")
         plt.ylabel(parameter)
@@ -248,7 +249,7 @@ class Sampler:
                  
     def print_covcorr(self, parameters, stat="corr", threshold=0.0, list_them=False):
         assert len(parameters) == 2, "covariance needs x,V or g,V"
-        assert stat == "cov" or stat == "corr", "Specify cov or corr for plot"
+        assert stat == "cov" or stat == "corr", "Specify cov or corr for matrix"
         
         part = lambda i : "re" if i%2==0 else "im"
 
@@ -277,7 +278,7 @@ class Sampler:
             
     def plot_covcorr(self, parameters, stat="corr", threshold=0.0):
         assert len(parameters) == 2, "covariance needs x,V or g,V"
-        assert stat == "cov" or stat == "corr", "Specify cov or corr for plot"
+        assert stat == "cov" or stat == "corr", "Specify cov or corr for matrix"
         
         part = lambda i : "re" if i%2==0 else "im"
         
@@ -314,7 +315,7 @@ class Sampler:
     def plot_sample_means(self, parameters):
         assert len(parameters) <= 3, "Too many parameters requested"
         for p in parameters:
-            assert p in [ "x", "g", "V" ], "Invalid parameter "+p
+            assert p in [ "x", "g", "V" ], "Invalid parameter: "+p
             
         for i, p in enumerate(parameters):
             data_packet = self.assemble_data([p])
@@ -369,7 +370,7 @@ class Sampler:
             BOTTOM = 0
             TOP = 1
             
-            sampled_gains = unsplit_re_im(self.assemble_data(["g"])["data"])                                 
+            sampled_gains = unsplit_re_im(self.samples["g"])   # Note need to unsplit                               
             
             g_limits_amp = np.zeros((sampled_gains.shape[1], 2))    
             g_limits_phase = np.zeros((sampled_gains.shape[1], 2))
@@ -401,7 +402,7 @@ class Sampler:
         plt.subplot(2, 1, 1)
 
         # 1. V true. The gains are 1? Can't remember why
-        plt.plot(range(self.vis_redcal.nant), np.abs(self.vis_true.get_antenna_gains()), color="gold", linewidth=0.6, label="g_true")
+        plt.plot(range(self.vis_redcal.nant), np.abs(self.vis_true.get_antenna_gains()), color="green", linewidth=0.6, label="g_true")
 
         # 2. The redcal gains as they are given to us by redcal.
         plt.plot(range(self.vis_redcal.nant), np.abs(self.vis_redcal.get_antenna_gains()), "r", linewidth=0.6, label="g_redcal")
@@ -422,7 +423,7 @@ class Sampler:
         plt.subplot(2, 1, 2)
 
         # 1. V true. The gains are 1? Can't remember why
-        plt.plot(range(self.vis_redcal.nant), np.angle(self.vis_true.get_antenna_gains()), color="gold", linewidth=0.6, label="g_true")
+        plt.plot(range(self.vis_redcal.nant), np.angle(self.vis_true.get_antenna_gains()), color="green", linewidth=0.6, label="g_true")
 
         # 2. The redcal gains as they are given to us by redcal.
         plt.plot(range(self.vis_redcal.nant), np.angle(self.vis_redcal.get_antenna_gains()), "r", linewidth=0.6, label="g_redcal")
@@ -442,33 +443,20 @@ class Sampler:
         plt.tight_layout()
 
     def assemble_data(self, parameters):
-        if len(parameters) == 1:
-            assert ("x" in parameters or "g" in parameters or "V" in parameters),\
-                    "Must be x or g or V in plot request."
-        else:
-            assert len(parameters) == 2 and ("x" in parameters or "g" in parameters) and "V" in parameters,\
-                        "Must be x or g and V in plot request."        
-        
-        assert not (self.gain_degeneracies_fixed and "x" in parameters),\
-                "Can't use x values when gain degeneracies applied."
+        assert len(parameters) == 2 and ("x" in parameters or "g" in parameters) and "V" in parameters,\
+                        "Must be x or g and V."        
         
         data_packet = {}
         if "x" in parameters:            
             data_packet["data"] = self.samples["x"]
             data_packet["x_or_g_len"] = self.samples["x"].shape[1]
         if "g" in parameters:
-            if self.gain_degeneracies_fixed:
-                data_packet["data"] = self.samples["g"]
-                data_packet["x_or_g_len"] = self.samples["g"].shape[1]
-            else:
-                gains = self.generate_sampled_gains_from_x()
-                data_packet["data"] = gains
-                data_packet["x_or_g_len"] = gains.shape[1]   
+            data_packet["data"] = self.samples["g"]
+            data_packet["x_or_g_len"] = self.samples["g"].shape[1]   
+            
+        # Now tack V on
         if "V" in parameters:
-            if "data" in data_packet:
-                data_packet["data"] = np.concatenate((data_packet["data"], self.samples["V"]), axis=1)
-            else:
-                data_packet["data"] = self.samples["V"]
+            data_packet["data"] = np.concatenate((data_packet["data"], self.samples["V"]), axis=1)
         
         return data_packet
                
@@ -687,69 +675,59 @@ class Sampler:
 
         return dist_mean, dist_covariance
     
-    def bests(self, method="mean"):
+    def bests(self, parameters=["x", "V"], method="mean"):
         def peak(a):
             # Get the peak 
             hist, bin_edges = np.histogram(a, bins=len(a)//10)
             bins = (bin_edges[1:]+bin_edges[:-1])/2
             return bins[np.argmax(hist)]
 
-        best_dict = {}
+        assert parameters == ["x", "V"] or parameters == ["g", "V"], "Calculation of best sample must use x,V or g,V"
 
-        parameters = [ "g", "V" ]
-        if not self.gain_degeneracies_fixed: parameters += [ "x" ]
+        best_dict = {}
         
         if method == "mean":
             for p in parameters:
-                data = self.assemble_data([p])["data"]
+                data = self.samples[p]
                 best_dict[p] = np.mean(data, axis=0)
 
-        elif method == "hist":
+        elif method == "peak":
              for p in parameters:
-                data = self.assemble_data([p])["data"]
+                data = self.samples[p]
                 best_dict[p] = np.array([ peak(data[:, i]) for i in range(data.shape[1]) ])
                 
         elif method == "ml":
+
             vv = copy.deepcopy(self.vis_redcal)
             assert np.sum(np.abs(vv.x)) == 0, "Redcal object contains x values"
                     
             best = -1e39
             where_best = 0
-            if self.gain_degeneracies_fixed:
-                params = ["g", "V"]
-            else:
-                params = ["x", "V"]
-            data_packet = self.assemble_data(params)
-            for i in range(data_packet["data"].shape[0]):   
-                if "x" in params:
-                    vv.x = unsplit_re_im(data[i, :data_packet["x_or_g_len"]])
+            for i in range(self.samples["x"].shape[0]):   
+                if "x" in parameters:
+                    vv.x = unsplit_re_im(restore_x(self.samples["x"][i]))
                 else:
-                    vv.g_bar = unsplit_re_im(data[i, :data_packet["x_or_g_len"]])
-                vv.V_model = unsplit_re_im(data[i, data_packet["x_or_g_len"]:])
+                    vv.g_bar = unsplit_re_im(self.samples["g"][i])
+                vv.V_model = unsplit_re_im(self.samples["V"][i])
                 lh = vv.get_unnormalized_likelihood()
                 if lh > best:
                     where_best = i
                     best = lh
-                    
-            if "x" in params:
-                best_dict["x"] = data_packet["data"][where_best, :data_packet["x_or_g_len"]]
-                vv.x = best_dict["x"] 
+
+            if "x" in parameters:
+                best_dict["x"] = self.samples["x"][where_best]
+
+                # Generate gains from best x
+                vv.x = unsplit_re_im(restore_x(best_dict["x"]))
                 best_dict["g"] = split_re_im(vv.get_antenna_gains())
             else:
-                best_dict["g"] = data_packet["data"][where_best, :data_packet["x_or_g_len"]]
-            best_dict["V"] = data_packet["data"][where_best, data_packet["x_or_g_len"]:]
+                best_dict["g"] = self.samples["g"][where_best]
+            best_dict["V"] = self.samples["V"][where_best]
         else:
             raise ValueError("Invalid method")
 
         return best_dict
     
-    def generate_sampled_gains_from_x(self):
-        sampled_gains = np.zeros((self.samples["x"].shape[0], self.samples["x"].shape[1]+1))
-        for i in range(self.samples["x"].shape[0]):
-            x = unsplit_re_im(restore_x(self.samples["x"][i]))
-            sampled_gains[i] = split_re_im(self.vis_redcal.g_bar*(1+x))  
-        return sampled_gains
-
     
     def fix_degeneracies(self):
         """
@@ -847,17 +825,21 @@ class Sampler:
 
         # Create calibrator and dict for the work
         RedCal = hc.redcal.RedundantCalibrator(reds)
-        gains_dict = {}
+        gains_dict = {}             # this is just used for temp space
         
         # Fix all the samples
         
-        # Generate sampled gains from the x samples by new_g = g*(1+x)
-        sampled_gains = self.generate_sampled_gains_from_x()
+        # Now fix the sampled gains and adjust the x values
+        self.samples["orig_x"] = np.copy(samples["x"])
+        self.samples["orig_g"] = np.copy(samples["g"])
+        for i in range(self.samples["orig_g"].shape[0]):
+            self.samples["g"][i] = split_re_im(fix(RedCal, unsplit_re_im(self.samples["orig_g"][i]), gains_dict))
             
-        # Now fix those sampled gains and load into the sample list
-        self.samples["g"] = np.zeros_like(sampled_gains)
-        for i in range(sampled_gains.shape[0]):
-            self.samples["g"][i] = split_re_im(fix(RedCal, unsplit_re_im(sampled_gains[i]), gains_dict))
+            # Adjust x
+            new_g = unsplit_re_im(self.samples["g"][i])
+            orig_g = unsplit_re_im(self.samples["orig_g"][i])
+            orig_x = unsplit_re_im(self.samples["orig_x"][i])
+            self.samples["x"][i] = split_re_im((orig_g*(1+orig_x))/new_g - 1)
             
   
         # Fix redcal gains
@@ -867,8 +849,13 @@ class Sampler:
 
         # Fix sampled best gains
         
-        self.vis_sampled.g_bar = fix(RedCal, self.vis_sampled.get_antenna_gains(), gains_dict)
-        self.vis_sampled.x.fill(0)
+        orig_g = self.vis_sampled.g_bar
+        orig_x = self.vis_sampled.x
+
+        self.vis_sampled.g_bar = self.vis_redcal.g_bar      # Update gain
+        
+        new_g = self.vis_sampled.g_bar
+        self.vis_sampled.x = (orig_g*(1+orig_x))/new_g - 1  # Update x
                           
         self.gain_degeneracies_fixed = True
     
@@ -877,11 +864,11 @@ class Sampler:
 if __name__ == "__main__":
 
     
-    sampler = Sampler(seed=99, niter=1000, random_the_long_way=False)
+    sampler = Sampler(seed=99, niter=1000, random_the_long_way=False, best_type="ml")
     sampler.load_nr_sim("/scratch3/users/hgarsden/catall/calibration_points/viscatBC", 
                     freq=0, time=0, remove_redundancy=False, initial_solve_for_x=False)    #sampler.load_sim(3)
 
-    print(sampler.vis_true.get_unnormalized_likelihood())
+    print(sampler.vis_true.get_unnormalized_likelihood(unity_N=True))
     
     S = np.eye(sampler.nant()*2-1)*0.01
     V_mean = sampler.vis_redcal.V_model
@@ -890,7 +877,7 @@ if __name__ == "__main__":
     
     sampler.run()
     #sampler.plot_marginals("x", 4)
-    print(sampler.vis_true.get_likelihood())
+    print(sampler.vis_redcal.get_unnormalized_likelihood(unity_N=True))
     #sampler.plot_marginals("V", 4)
     exit()
 
