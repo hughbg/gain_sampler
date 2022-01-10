@@ -1,8 +1,8 @@
 import matplotlib.pyplot as plt
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 from vis_creator import VisSim, VisCal, VisTrue
-from gls import gls_solve, generate_proj, generate_proj1, reduce_dof, restore_x
-from calcs import split_re_im, unsplit_re_im, BlockMatrix
+from gls import gls_solve, generate_proj
+from calcs import split_re_im, unsplit_re_im, BlockMatrix, remove_x_im, restore_x_im
 import hera_cal as hc
 import corner
 import copy
@@ -13,9 +13,41 @@ import scipy.linalg
 
 class Sampler:
     
+    """
+    A class that loads simulations, runs sampling of x and V, and has functions for plotting results.
+
+    Parameters
+    ----------
+    niter : int
+        How many iterations of Gibbs sampling to execute.
+    burn_in : float
+        The percentage of samples to throw away at the beginning.
+        Must be 0-99.
+    seed : float
+        Set this as a random seed, so that sampling runs can be repeated.
+    random_the_long_way : bool
+        If true, draw random sampled for Gibbs sampling using contrained realization equations.
+        Otherwise, use the equivalent multivariate Gaussian and draw samples from that.
+    best_type: str
+        After sampling, the "best" samples are selected and used as the "result" of sampling.
+        This parameter indicates how to select the best samples. There are three options:
+        "mean": Get the mean value of each x, V sampled value.
+        "peak": Form histograms and get the peak of the histogram, for each x, V sampled value.
+        "ml": Find the set of samples that has the highest likelihood. This is different from
+            the previous two options because it operates on the complete set of parameters at each
+            sampling step, intead of treating each parameter individually.
+    """
+    
     def __init__(self, niter=1000, burn_in=10, seed=None, random_the_long_way=False, best_type="mean"):
+
+
         if seed is not None:
             np.random.seed(seed)
+            
+        assert niter > 0, "niter is invalid"
+        assert burn_in >=0 and burn_in < 100, "burn_in must be 0-99"
+        n_samples_not_burned = niter-(niter*burn_in)//100
+        assert n_samples_not_burned > 0, "burn_in will leave no samples"
         self.niter = niter
         self.burn_in = burn_in
         self.random_the_long_way = random_the_long_way
@@ -23,6 +55,40 @@ class Sampler:
         self.gain_degeneracies_fixed = False
     
     def load_nr_sim(self, file_root, time_range=None, freq_range=None, remove_redundancy=False, initial_solve_for_x=False):
+        """
+        Load a simulation from the Non-Redundant pipeline.
+
+        Parameters
+        ----------
+        file_root : str
+            The pattern that will be used to find all the files associated with the simulation.
+            Example: /scratch3/users/hgarsden/catall/calibration_points/viscatBC
+            The file_root string will be extended to form actual file names.
+        time_range : tuple of 2 integers or None
+            (start_time_index, end_time_index)
+            Indexes into the simulation that specify a chunk of time to use from the
+            simulation. The range is Python style so it is up to but not including
+            end_time_index.
+            If None, then all times are used.
+        freq_range: tuple of 2 integers or None
+            Like time_range but specifies a chunk of frequencies.
+        remove_redundancy: bool
+            If True: remove the redundant sets of baselines and place each baseline 
+            into its own redundant set.
+        initial_solve_for_x : bool
+            If True: Use a generalized least squares solver to generate x offsets that
+            are applied to gains in the redcal calibrated solution. Hence improving the
+            redcal solution.
+
+        Returns
+        -------
+        vis : ndarray of complex
+            Array of visibilities at each LST and frequency appropriate
+            for the given sky temperature model, beam size model, and
+            baseline vector. Returned in units of Jy with shape
+            (lsts.size, freqs.size).
+        """
+
         print("Loading NR sim from", file_root)
         self.vis_redcal = VisCal(file_root, time_range=time_range, freq_range=freq_range, remove_redundancy=remove_redundancy) 
         self.vis_true = VisTrue(file_root, time_range=time_range, freq_range=freq_range)
@@ -57,10 +123,6 @@ class Sampler:
     def nvis(self):
         return self.vis_redcal.nvis
     
-    def reform_x_from_samples(self, sampled_x, shape):
-        x = sampled_x.reshape(shape[0], shape[1], shape[2]*2-1)
-        x = restore_x(x)
-        return unsplit_re_im(x)
                    
     def run(self):
         if not hasattr(self,"vis_true"):
@@ -80,6 +142,7 @@ class Sampler:
         
         # Take num samples
         for i in range(self.niter):
+
             # Use the sampled x to change the model sampling distribution, and take a sample
             v_model_sampling.x = new_x
             if self.random_the_long_way:
@@ -124,8 +187,10 @@ class Sampler:
         assert what in [ "x", "g", "V" ], "Invalid sample specification"
 
         if time is None and freq is not None:
+            assert False, "Both a time and frequency must be specified"
             samples = self.samples[what][:, :, freq:freq+1, :]
         elif time is not None and freq is None:
+            assert False, "Both a time and frequency must be specified"
             samples = self.samples[what][:, time:time+1, :, :]
         elif time is not None and freq is not None:
             samples = self.samples[what][:, time:time+1, freq:freq+1, :]
@@ -137,8 +202,10 @@ class Sampler:
     def select_values_by_time_freq(self, values, time=None, freq=None):
 
         if time is None and freq is not None:
+            assert False, "Both a time and frequency must be specified"
             v = values[:, freq:freq+1, :]
         elif time is not None and freq is None:
+            assert False, "Both a time and frequency must be specified"
             v = values[time:time+1, :, :]
         elif time is not None and freq is not None:
             v = values[time:time+1, freq:freq+1, :]
@@ -151,11 +218,14 @@ class Sampler:
         samples_x = split_re_im(x)    
         samples_x = np.delete(samples_x, samples_x.shape[3]-1, axis=3)     # Remove unsampled x
         samples_x = samples_x.reshape(samples_x.shape[0], -1)
-
             
         return samples_x
             
-       
+    def reform_x_from_samples(self, sampled_x, shape):
+        x = sampled_x.reshape(shape[0], shape[1], shape[2]*2-1)
+        x = restore_x_im(x)
+        return unsplit_re_im(x)
+
     
     def plot_marginals(self, parameter, cols, time=None, freq=None, which=[ "True", "Redcal", "Sampled" ]):
         def plot_hist(a, fname, label, sigma_prior, other_vals, index):
@@ -173,10 +243,10 @@ class Sampler:
             plt.legend()
             
         assert isinstance(parameter, str), "marginal parameter must be string"
-        assert len(which) > 0, "No results specified to plot"
-        for w in which:
-            assert w in [ "True", "Redcal", "Sampled" ], "Invalid results to plot: "+str(w)
-            
+        if len(which) > 0:
+            for w in which:
+                assert w in [ "True", "Redcal", "Sampled" ], "Invalid results to plot: "+str(w)
+
         print("Plot marginals")
         
         if parameter == "x":
@@ -249,8 +319,15 @@ class Sampler:
         plt.tight_layout()
         
         
-    def plot_corner(self, parameters, time=None, freq=None):
+    def plot_corner(self, parameters, time=None, freq=None, threshold=0.0, xgs=None, Vs=None):
         assert parameters == ["x", "V"] or parameters == ["g", "v"], "corner plot needs x,V or g,V"
+        assert threshold >= 0
+        assert (threshold == 0.0 and xgs is None and Vs is None) or \
+                (threshold > 0.0 and xgs is None and Vs is None) or \
+                (threshold == 0.0 and xgs is not None and Vs is not None), \
+                "Must have: threshold==0 and xgs=list and Vgs==list OR threshold>0 and xgs=None and Vgs==None"+ \
+                "\nOR threshold==0 and xgs=None and Vgs==None"
+                
         
         print("Plot corner")
         
@@ -259,10 +336,44 @@ class Sampler:
         part = lambda i : "re" if i%2==0 else "im"
        
         name = "x" if "x" in parameters else "g"
-        print(name+" values:", str(data_packet["x_or_g_len"])+",", "V values:", data_packet["V_len"])
-        
         labels = [ r"$"+part(i)+"("+name+"_"+str(i//2)+")$" for i in range(data_packet["x_or_g_len"]) ]+  \
                     [ r"$"+part(i)+"(V_"+str(i//2)+")$" for i in range(data_packet["V_len"]) ]
+        
+        if threshold > 0.0:
+            m = np.corrcoef(data_packet["data"], rowvar=False)
+            m[np.triu_indices(m.shape[0])] = 0
+
+            num_x_left = 0
+
+            m_indices = np.argwhere(np.abs(m) > threshold)
+            data_indices = np.unique(np.ravel(m_indices))
+            
+            to_delete = np.arange(m.shape[0])[np.isin(np.arange(m.shape[0]), data_indices, invert=True)]
+            labels = [ labels[i] for i in range(len(labels)) if i not in to_delete ]
+            num_x_left = data_packet["x_or_g_len"]-np.where(to_delete<data_packet["x_or_g_len"])[0].size
+         
+            data_packet["data"] = np.delete(data_packet["data"], to_delete, axis=1)
+            data_packet["x_or_g_len"] = num_x_left
+            data_packet["V_len"] = data_packet["data"].shape[1]-num_x_left
+            
+            assert data_packet["data"].shape[0] > 0, "No parameters to plot"
+            
+        if xgs is not None and Vs is not None:
+            Vs = [ v+data_packet["x_or_g_len"] for v in Vs ]
+            
+            to_delete = np.arange(data_packet["data"].shape[0])[np.isin(np.arange(data_packet["data"].shape[0]), xgs+Vs, invert=True)]
+            labels = [ labels[i] for i in range(len(labels)) if i not in to_delete ]
+            num_x_left = data_packet["x_or_g_len"]-np.where(to_delete<data_packet["x_or_g_len"])[0].size
+         
+            data_packet["data"] = np.delete(data_packet["data"], to_delete, axis=1)
+            data_packet["x_or_g_len"] = num_x_left
+            data_packet["V_len"] = data_packet["data"].shape[1]-num_x_left
+            
+            assert data_packet["data"].shape[0] > 0, "No parameters to plot"
+            
+
+            
+        print(name+" values:", str(data_packet["x_or_g_len"])+",", "V values:", data_packet["V_len"])
 
         figure = corner.corner(data_packet["data"], labels=labels, show_titles=True, use_math_text=True, labelpad=0.2)
         
@@ -326,9 +437,10 @@ class Sampler:
         plt.ylabel(parameter)
         plt.title("Traces for "+parameter)
                  
-    def print_covcorr(self, parameters, time=None, freq=None, stat="corr", threshold=0.0, list_them=False):
+    def print_covcorr(self, parameters, time=None, freq=None, stat="corr", threshold=0.0, list_them=False, count_them=False):
         assert len(parameters) == 2, "covariance needs x,V or g,V"
         assert stat == "cov" or stat == "corr", "Specify cov or corr for matrix"
+        assert threshold >= 0
         
         print("Print covcorr")
         
@@ -336,6 +448,11 @@ class Sampler:
 
         data_packet = self.assemble_data(parameters, time, freq)
         m = np.cov(data_packet["data"], rowvar=False) if stat == "cov" else np.corrcoef(data_packet["data"], rowvar=False) 
+        if count_them:
+            np.fill_diagonal(m, 0)
+            m[np.triu_indices(m.shape[0])] = 0
+            print(np.sum(np.where(abs(m) > threshold, 1, 0)))
+            return
 
         name = "x" if "x" in parameters else "g"
         labels = [ part(i)+"("+name+"_"+str(i//2)+")" for i in range(data_packet["x_or_g_len"]) ]+  \
@@ -360,6 +477,7 @@ class Sampler:
     def plot_covcorr(self, parameters, time=None, freq=None, stat="corr", threshold=0.0):
         assert len(parameters) == 2, "covariance needs x,V or g,V"
         assert stat == "cov" or stat == "corr", "Specify cov or corr for matrix"
+        assert threshold >= 0
         
         part = lambda i : "re" if i%2==0 else "im"
         
@@ -375,10 +493,11 @@ class Sampler:
         print(param_tag+" values:", str(data_packet["x_or_g_len"])+",", "V values:", data_packet["V_len"])
         
         m = np.cov(data_packet["data"], rowvar=False) if stat == "cov" else np.corrcoef(data_packet["data"], rowvar=False) 
+        print("Matrix size", m.shape)
 
         np.fill_diagonal(m, 0)
         m[np.triu_indices(m.shape[0])] = 0
-        m[np.logical_and(m>-threshold,m<threshold)] = 0
+        if threshold > 0.0: m[np.logical_and(m>-threshold,m<threshold)] = 0
 
         plt.figure()
         ax = plt.gca()
@@ -611,8 +730,8 @@ class Sampler:
 
                            
     def x_random_draw(self, v):
-        A = reduce_dof(generate_proj(v.g_bar, v.V_model))  # depends on model
-        #A = reduce_dof(generate_proj1(v.nvis, v.nant))
+        A = remove_x_im(generate_proj(v.g_bar, v.V_model))  # depends on model
+        #A = remove_x_im(generate_proj1(v.nvis, v.nant))
         N = np.diag(split_re_im(v.obs_variance))
         d = split_re_im(v.get_reduced_observed())                       # depends on model
         #d = split_re_im(v.get_reduced_observed1()) 
@@ -650,8 +769,8 @@ class Sampler:
 
     
     def x_random_draw1(self, v):
-        A = reduce_dof(generate_proj(v.g_bar, v.V_model))  # depends on model
-        #A = reduce_dof(generate_proj1(v.nvis, v.nant))
+        A = remove_x_im(generate_proj(v.g_bar, v.V_model))  # depends on model
+        #A = remove_x_im(generate_proj1(v.nvis, v.nant))
         N = np.diag(split_re_im(v.obs_variance))
         d = split_re_im(v.get_reduced_observed())                       # depends on model
         #d = split_re_im(v.get_reduced_observed1()) 
@@ -677,7 +796,6 @@ class Sampler:
         # the mean of the x distribution will be the GLS solution.
 
         A = generate_proj(v.g_bar, v.project_model())  # depends on model
-        #A = reduce_dof(generate_proj1(v.nvis, v.nant))
         
         bm = BlockMatrix()
         for time in range(v.ntime):
@@ -996,8 +1114,7 @@ class Sampler:
         # Fix redcal gains
     
         self.vis_redcal.g_bar = fix(RedCal, self.vis_sampled.get_antenna_gains().astype(np.complex64), gains_dict)
-        self.vis_redcal.x.fill(0)            # should be 0 anyway
-        exit()
+        self.vis_redcal.x.fill(0)            # should be 0 unless initial_solve_for_x
 
         # Fix the x best sample
         
@@ -1012,27 +1129,57 @@ class Sampler:
 
 
 if __name__ == "__main__":
-
-    sampler2 = Sampler(seed=99, niter=1000, random_the_long_way=False)
-    sampler2.load_nr_sim("/scratch3/users/hgarsden/catall/calibration_points/viscatBC", 
-                        remove_redundancy=False, initial_solve_for_x=False)
-    S = np.eye(sampler2.nant()*2-1)*0.01
-    V_mean = sampler2.vis_redcal.V_model
-    Cv = np.eye(V_mean.size*2)
-    sampler2.set_S_and_V_prior(S, V_mean, Cv)
-    sampler2.run()
-    exit()
-
+    from resource import getrusage, RUSAGE_SELF
 
     sampler = Sampler(seed=99, niter=1000, burn_in=10, best_type="mean", random_the_long_way=False)
-    sampler.load_nr_sim("/scratch3/users/hgarsden/catall/calibration_points/viscatBC", 
-                    time_range=(0, 2), freq_range=(0, 2), remove_redundancy=False, initial_solve_for_x=False)    
+    sampler.load_sim(4, ntime=1, nfreq=1, x_sigma=0)
+    print("Likelihood before run", sampler.vis_true.get_unnormalized_likelihood(unity_N=True))   
     S = np.eye(sampler.nant()*2-1)*0.01
     V_mean = sampler.vis_redcal.V_model
     Cv = np.eye(V_mean.shape[2]*2)
     sampler.set_S_and_V_prior(S, V_mean, Cv)
 
     sampler.run()
+    print("Likelihood after run", sampler.vis_sampled.get_unnormalized_likelihood(unity_N=True))   
+    
+    usage = getrusage(RUSAGE_SELF)
+    print("SIM", usage.ru_maxrss/1000.0/1000)      # Usage in GB
+    
+    sampler.plot_corner(["x", "V"], threshold=0.8)
+
+    exit()
+    
+    
+    cv_factor = 1
+    for i in range(10):
+        print("cv", cv_factor, "===================================================")
+        
+        s_factor = 1
+        
+        for j in range(10):
+            print("s", s_factor, "===================================================")
+            
+            sampler = Sampler(seed=99, niter=10000, burn_in=10, best_type="mean", random_the_long_way=False)
+            sampler.load_nr_sim("/scratch3/users/hgarsden/catall/calibration_points/viscatBC", 
+                            time_range=(0, 2), freq_range=(0, 2), remove_redundancy=False, initial_solve_for_x=False)  
+            print("Likelihood before run", sampler.vis_true.get_unnormalized_likelihood(over_all=True, unity_N=True))   
+
+            S = np.eye(sampler.nant()*2-1)*0.01*s_factor
+            V_mean = sampler.vis_redcal.V_model #*np.random.rand(sampler.vis_redcal.V_model.shape[0],
+                                                              #sampler.vis_redcal.V_model.shape[1],
+                                                              #sampler.vis_redcal.V_model.shape[2])
+            Cv = np.eye(V_mean.shape[2]*2)*cv_factor
+            sampler.set_S_and_V_prior(S, V_mean, Cv)
+
+            sampler.run()
+            print("Likelihood after run", sampler.vis_sampled.get_unnormalized_likelihood(over_all=True, unity_N=True))   
+            sampler.print_covcorr(["x", "V"], count_them=True, threshold=0.8)
+            
+            s_factor *= 1.3
+            
+            
+        cv_factor *= 1.3
+        
     
     
     #sampler.plot_marginals("x", 5, time=0, freq=0); plt.clf()
@@ -1040,5 +1187,5 @@ if __name__ == "__main__":
     #sampler.plot_covcorr(["x", "V"],  time=0, freq=None); plt.clf()
     #sampler.plot_sample_means(["x"],  time=0, freq=0); plt.clf()
     #sampler.plot_results(time=0, freq=0); plt.clf()
-    sampler.plot_gains(); plt.clf()
-    #sampler.plot_corner(["x", "V"], time=0, freq=0)
+    #sampler.plot_gains(); plt.clf()
+    #sampler.plot_corner(["x", "V"], time=0, freq=0, threshold=0.8)

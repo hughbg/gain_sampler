@@ -1,6 +1,6 @@
 import numpy as np
 from numpy.linalg import inv
-from calcs import split_re_im, unsplit_re_im
+from calcs import split_re_im, unsplit_re_im, BlockMatrix, remove_x_im, restore_x_im
 
 def gls_inv_covariance(proj, Ninv):
     """
@@ -33,59 +33,29 @@ def generate_proj(g_bar, model):
 
         return Vij_re, Vij_im
 
-    # Generate the projection operator
-    proj = np.zeros((model.size*2, g_bar.size*2))
-    k = 0
-    for i in range(g_bar.size):
-        for j in range(i+1, g_bar.size):
-            re, im = separate_real_imag(g_bar[i], np.conj(g_bar[j]), model[k])
+    # Generate the projection operator for each time/freq and merge
+    bm = BlockMatrix()
+    for time in range(g_bar.shape[0]):
+        for freq in range(g_bar.shape[1]):
+            proj = np.zeros((model.shape[2]*2, g_bar.shape[2]*2))
+            k = 0
+            for i in range(g_bar.shape[2]):
+                for j in range(i+1, g_bar.shape[2]):
+                    re, im = separate_real_imag(g_bar[time, freq, i], np.conj(g_bar[time, freq, j]), model[time, freq, k])
 
-            proj[k*2,i*2] = re; proj[k*2,i*2+1] = -im
-            proj[k*2,j*2] = re; proj[k*2,j*2+1] = im
+                    proj[k*2,i*2] = re; proj[k*2,i*2+1] = -im
+                    proj[k*2,j*2] = re; proj[k*2,j*2+1] = im
 
-            proj[k*2+1,i*2] = im; proj[k*2+1,i*2+1] = re
-            proj[k*2+1,j*2] = im; proj[k*2+1,j*2+1] = -re
+                    proj[k*2+1,i*2] = im; proj[k*2+1,i*2+1] = re
+                    proj[k*2+1,j*2] = im; proj[k*2+1,j*2+1] = -re
 
-            k += 1
+                    k += 1
+            
+            
+            bm.add(remove_x_im(proj))
 
-    return proj
+    return bm.assemble()
 
-def generate_proj1(nvis, nant):
-
-
-    # Generate the projection operator
-    proj = np.zeros((nvis*2, nant*2))
-    k = 0
-    for i in range(nant):
-        for j in range(i+1, nant):
- 
-            proj[k*2,i*2] = 1; proj[k*2,j*2] = 1
-
-            proj[k*2+1,i*2+1] = 1; proj[k*2+1,j*2+1] = -1
-
-            k += 1
-
-    return proj
-
-def reduce_dof(p):
-    if p.ndim == 2:
-        return np.delete(p, p.shape[1]-1, axis=1)
-    else: return np.delete(p, p.size-1)
-    
-"""
-    best = 1e9
-    for i in range(1, p.shape[1], 2):
-        cut = np.delete(p, i, axis=1)
-        cond = np.linalg.cond(np.dot(cut.T, cut))
-        if cond < best:
-            cond = best
-            where_best = i
-
-    return np.delete(p, where_best, axis=1), where_best
-"""
-
-def restore_x(x_red):
-    return np.append(x_red, 0)
 
 def gls_solve(vis):
     """
@@ -104,23 +74,31 @@ def gls_solve(vis):
         raise RuntimeError("GLS can only operate on offsets used approximately")
     
     # Convert the variances into an expanded diagonal array 
-    Ninv = inv(np.diag(split_re_im(vis.obs_variance)))
-    
+    bm = BlockMatrix()
+    for time in range(vis.ntime):
+        for freq in range(vis.nfreq):
+            bm.add((split_re_im(vis.obs_variance[time][freq])))
+    N = bm.assemble()
+    Ninv = np.linalg.inv(N)
+        
     # Generate projection matrix
     proj = generate_proj(vis.g_bar, vis.V_model)
-    
-    # Now remove a column from the proj matrix, which will reduce the
-    # number of x values found by 1. This removes a degree of freedom
-    # so a solution can be found.
-    proj = reduce_dof(proj)
 
     inv_cov = gls_inv_covariance(proj, Ninv)
     
     #print("RMS", rms(np.dot(Ninv, data)), rms(np.dot(proj.T, np.dot(Ninv, data))))
     # Calculate GLS solution
     
-    xhat = np.dot(inv_cov, np.dot(proj.T, np.dot(Ninv, split_re_im(vis.get_reduced_observed()))))
+    xhat = np.dot(inv_cov, np.dot(proj.T, np.dot(Ninv, split_re_im(np.ravel(vis.get_reduced_observed())))))
     
     # Restore the missing x value and set it to zero. Form complex numbers and update vis.
-    return unsplit_re_im(restore_x(xhat))      
+    xhat = xhat.reshape(vis.x.shape[0], vis.x.shape[1], -1)
+    return unsplit_re_im(restore_x_im(xhat))  
 
+
+if __name__ == "__main__":
+    from vis_creator import VisSim
+    vis = VisSim(4, nfreq=2, ntime=1)
+    print("Likelihood before gls", vis.get_unnormalized_likelihood(unity_N=True))    
+    vis.x = gls_solve(vis)
+    print("Likelihood after gls", vis.get_unnormalized_likelihood(unity_N=True))    

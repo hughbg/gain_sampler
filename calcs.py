@@ -15,35 +15,71 @@ def calc_visibility(level, g_bar_i, g_bar_j, V_model_ij, x_i, x_j):
         raise ValueError("Unknown level")
 
 def split_re_im(a):
-    if len(a.shape) == 1:
-        new_a = np.empty(a.size*2)
-        for i in range(a.size):
-            new_a[i*2] = a[i].real
-            new_a[i*2+1] = a[i].imag
-    else:
-        # Split 2-d with the first axis the number of samples, second axis being the values
-        new_a = np.zeros((a.shape[0], a.shape[1]*2))
-        for i in range(a.shape[1]):
-            new_a[:, 2*i] = np.real(a[:, i])
-            new_a[:, 2*i+1] = np.imag(a[:, i])
-        
-    return new_a
+    shape = a.shape
+    b = a.ravel()
+    splitted = np.empty(b.size*2)
+    for i in range(b.size):
+        splitted[i*2] = b[i].real
+        splitted[i*2+1] = b[i].imag
+    
+    new_shape = list(a.shape)
+    new_shape[-1] *= 2
+
+    return splitted.reshape(tuple(new_shape))
 
 def unsplit_re_im(a):
-    if len(a.shape) == 1:
-        new_a = np.empty(a.size//2, dtype=np.complex64)
-        for i in range(new_a.size):
-            new_a[i] = complex(a[i*2], a[i*2+1])
-    elif len(a.shape) == 2:
-        # Unsplit 2-d with the first axis the number of samples, second axis being the values
-        new_a = np.zeros((a.shape[0], a.shape[1]//2), dtype=np.complex64)
-        for i in range(new_a.shape[1]):
-            new_a[:, i] = a[:, 2*i]+a[:, 2*i+1]*1j
-    else:
-        raise RuntimeError("Don't know how to unsplit shape "+str(a.shape))
-    return new_a
+    shape = a.shape
+    b = a.ravel()
+    unsplitted = np.empty(b.size//2, dtype=np.complex64)
+    for i in range(unsplitted.size):
+        unsplitted[i] = complex(b[i*2], b[i*2+1])
+    
+    new_shape = list(a.shape)
+    new_shape[-1] //= 2
+
+    return unsplitted.reshape(tuple(new_shape))
+
+def remove_x_im(a):
+    return np.delete(a, a.shape[-1]-1, axis=len(a.shape)-1)
+
+def restore_x_im(a):
+    slice_shape = list(a.shape)[:-1]+[1]
+    return np.concatenate((a, np.zeros(tuple(slice_shape))), axis=len(a.shape)-1)    
+
+class BlockMatrix:
+    
+    def __init__(self):
+        self.matrices_incoming = []
+    
+    def add(self, a, replicate=1):
+        assert len(a.shape) <= 2, "Can't assemble block matrix with dimensions > 2"
+        for i in range(replicate):
+            self.matrices_incoming.append(a)
+        
+    def assemble(self):
+        assert len(self.matrices_incoming) > 0, "No matrices to assemble"
+        if len(self.matrices_incoming[0].shape) == 1:
+            dim = ( self.matrices_incoming[0].shape[0], self.matrices_incoming[0].shape[0] )
+        else:
+            dim = self.matrices_incoming[0].shape
+            
+        block_matrix = np.zeros((dim[0]*len(self.matrices_incoming), dim[1]*len(self.matrices_incoming)))
+        
+        for i, a in enumerate(self.matrices_incoming):
+            if len(a.shape) == 1:
+                assert dim == ( a.shape[0], a.shape[0] ), "Vector cannot be diagonalized to right shape"
+                block_matrix[i*dim[0]:(i+1)*dim[0], i*dim[1]:(i+1)*dim[1]] = np.diag(a)
+            else:
+                assert dim == a.shape, "Matrix of wrong size for adding to block matrix"
+                block_matrix[i*dim[0]:(i+1)*dim[0], i*dim[1]:(i+1)*dim[1]] = a
+
+        return block_matrix
+            
 
 if __name__ == "__main__":
-    a = unsplit_re_im(np.array([[1, 0], [2, 0], [3, 0], [4, 0], [5, 0], [6, 0]]))
-    print(a)
-    print(split_re_im(a))
+    bm = BlockMatrix()
+    bm.add(np.array([1, 1]))
+    bm.add(np.array([[2,2,2],[2,2]]))
+    bm.add(np.array([1, 1]))
+    print(bm.assemble())
+           
