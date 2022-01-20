@@ -2,13 +2,12 @@ import matplotlib.pyplot as plt
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 from vis_creator import VisSim, VisCal, VisTrue
 from gls import gls_solve, generate_proj
-from calcs import split_re_im, unsplit_re_im, BlockMatrix, remove_x_im, restore_x_im
+from calcs import split_re_im, unsplit_re_im, BlockMatrix, remove_x_im, restore_x_im, get_cov_matrix
 import hera_cal as hc
 import corner
 import copy
 import numpy as np
-import scipy.linalg
-
+import scipy.linalg, scipy.sparse
 
 
 class Sampler:
@@ -38,7 +37,7 @@ class Sampler:
             sampling step, intead of treating each parameter individually.
     """
     
-    def __init__(self, niter=1000, burn_in=10, seed=None, random_the_long_way=False, best_type="mean"):
+    def __init__(self, niter=1000, burn_in=10, seed=None, random_the_long_way=False, use_conj_grad=True, best_type="mean"):
 
 
         if seed is not None:
@@ -51,7 +50,9 @@ class Sampler:
         self.niter = niter
         self.burn_in = burn_in
         self.random_the_long_way = random_the_long_way
+        self.use_conj_grad = use_conj_grad
         self.best_type = best_type
+        
         self.gain_degeneracies_fixed = False
     
     def load_nr_sim(self, file_root, time_range=None, freq_range=None, remove_redundancy=False, initial_solve_for_x=False):
@@ -112,10 +113,10 @@ class Sampler:
 
         self.file_root = ""
             
-    def set_S_and_V_prior(self, S, V_mean, Cv):
-        self.S = S
+    def set_S_and_V_prior(self, S_diag, V_mean, Cv_diag):
+        self.S = get_cov_matrix(self.vis_redcal.ntime, self.vis_redcal.nfreq, self.vis_redcal.nant, S_diag)
         self.V_mean = V_mean
-        self.Cv = Cv
+        self.Cv = get_cov_matrix(self.vis_redcal.ntime, self.vis_redcal.nfreq, self.vis_redcal.nant, Cv_diag)
         
     def nant(self):
         return self.vis_redcal.nant
@@ -157,7 +158,7 @@ class Sampler:
             # Use the sampled model to change the x sampling distribution, and take a sample
             v_x_sampling.V_model = sampled_V[i]
             if self.random_the_long_way:
-                sample = self.x_random_draw1(v_x_sampling)
+                sample = self.x_random_draw(v_x_sampling)
             else:
                 x_dist_mean, x_dist_covariance = self.new_x_distribution(v_x_sampling)
                 sample = np.random.multivariate_normal(x_dist_mean, x_dist_covariance, 1)  
@@ -729,26 +730,6 @@ class Sampler:
         self.sampled_V = sampled_V
 
                            
-    def x_random_draw(self, v):
-        A = remove_x_im(generate_proj(v.g_bar, v.V_model))  # depends on model
-        #A = remove_x_im(generate_proj1(v.nvis, v.nant))
-        N = np.diag(split_re_im(v.obs_variance))
-        d = split_re_im(v.get_reduced_observed())                       # depends on model
-        #d = split_re_im(v.get_reduced_observed1()) 
-        S = self.S
-        
-        N_inv = np.linalg.inv(N)
-        S_inv = np.linalg.inv(S) 
-        A_N_A = np.dot(A.T, np.dot(N_inv, A))
-        
-        rhs = np.dot(A.T, np.dot(N_inv, d))
-        rhs += np.dot(A.T, np.dot(self.sqrtm(N_inv), self.standard_random_draw(A.shape[0])))
-        rhs += np.dot(self.sqrtm(S_inv), self.standard_random_draw(A.shape[1]))
-        
-        bracket_term = S_inv+A_N_A
-        
-        return np.dot(np.linalg.inv(bracket_term), rhs)
-    
     def random_draw(self, first_term, A, S, N):
         N_inv = np.linalg.inv(N)
         S_inv = np.linalg.inv(S) 
@@ -763,29 +744,56 @@ class Sampler:
         bracket_term = np.eye(S.shape[0])
         bracket_term += np.dot(S_sqrt, np.dot(A_N_A, S_sqrt))
         
-        x = np.dot(np.linalg.inv(bracket_term), rhs)
+        if self.use_conj_grad:
+            x, info = scipy.sparse.linalg.cg(bracket_term, rhs)
+            assert info == 0
+        else: x = np.dot(np.linalg.inv(bracket_term), rhs)
         
         return np.dot(S_sqrt, x)
 
     
-    def x_random_draw1(self, v):
-        A = remove_x_im(generate_proj(v.g_bar, v.V_model))  # depends on model
-        #A = remove_x_im(generate_proj1(v.nvis, v.nant))
-        N = np.diag(split_re_im(v.obs_variance))
-        d = split_re_im(v.get_reduced_observed())                       # depends on model
+    def x_random_draw(self, v):
+        A = generate_proj(v.g_bar, v.project_model())  # depends on model
+        
+        bm = BlockMatrix()
+        for time in range(v.ntime):
+            for freq in range(v.nfreq):
+                bm.add((split_re_im(v.obs_variance[time][freq])))
+        N = bm.assemble()
+        
+        d = split_re_im(np.ravel(v.get_reduced_observed()))                     
         #d = split_re_im(v.get_reduced_observed1()) 
-        S = self.S
+        
+        bm = BlockMatrix()
+        for time in range(v.ntime):
+            for freq in range(v.nfreq):
+                bm.add((self.S))
+        S = bm.assemble()
         
         return self.random_draw(np.dot(A.T, np.dot(np.linalg.inv(N), d)), A, S, N)
         
     
     def V_random_draw(self, v):
-        A = self.generate_m_proj(v)          
-        A = np.dot(A, v.model_projection)
-        N = np.diag(split_re_im(v.obs_variance))
-        Cv = self.Cv
-        d = split_re_im(v.V_obs)
-        V_mean = split_re_im(self.V_mean)
+        A = self.generate_m_proj(v)   # Square matrix of shape nvis*2*ntime*nfreq
+        bm = BlockMatrix()
+        bm.add(v.model_projection, replicate=v.ntime*v.nfreq)
+        redundant_projector = bm.assemble()   # Non square matrix of shape nvis*2*ntime*nfreq x nredundant_vis*2*nreq*ntime
+        A = np.dot(A, redundant_projector)    # Non square matrix of shape nvis*2*ntime*nfreq x nredundant_vis*2*nreq*ntime
+    
+        bm = BlockMatrix()
+        for time in range(v.ntime):
+            for freq in range(v.nfreq):
+                bm.add((split_re_im(v.obs_variance[time][freq])))
+        N = bm.assemble()
+        
+        bm = BlockMatrix()
+        for time in range(v.ntime):
+            for freq in range(v.nfreq):
+                bm.add(self.Cv)
+        Cv = bm.assemble()
+        
+        V_mean = split_re_im(np.ravel(self.V_mean))
+        d = split_re_im(np.ravel(v.V_obs))
                                 
         return self.random_draw(np.dot(A.T, np.dot(np.linalg.inv(N), d))+np.dot(np.linalg.inv(Cv), V_mean), A, Cv, N)
 
@@ -806,11 +814,7 @@ class Sampler:
         d = split_re_im(np.ravel(v.get_reduced_observed()))                     
         #d = split_re_im(v.get_reduced_observed1()) 
         
-        bm = BlockMatrix()
-        for time in range(v.ntime):
-            for freq in range(v.nfreq):
-                bm.add((self.S))
-        S = bm.assemble()
+        S = self.S
 
         N_inv = np.linalg.inv(N)
         S_inv = np.linalg.inv(S)
@@ -822,25 +826,8 @@ class Sampler:
 
         return dist_mean, dist_covariance
 
-    def separate_terms(self, gi, gj, xi, xj):
-        """
-        Form 2-D matrix that can be multiplied by re(model), im(model)
-        to give re(V_obs), im(V_obs)
-        """
-
-        a = gi.real
-        b = gi.imag
-        c = gj.real
-        d = gj.imag
-        e = xi.real
-        f = xi.imag
-        g = xj.real
-        h = xj.imag
-
-        return a*c+b*d + a*c*e+b*d*e-b*c*f+a*d*f + a*c*g+b*d*g+b*c*h-a*d*h, \
-                (b*c-a*d) +(a*c*f+b*d*f+b*c*e-a*d*e) + (-a*c*h-b*d*h+b*c*g-a*d*g)
     
-    def separate_terms1(self, gi, gj, xi, xj):
+    def separate_terms(self, gi, gj, xi, xj):
         v = gi*np.conj(gj)*(1+xi+np.conj(xj))
         return v.real, v.imag
 
@@ -852,8 +839,7 @@ class Sampler:
                 k = 0
                 for i in range(vis.nant):
                     for j in range(i+1, vis.nant):
-                        #term1, term2 = self.separate_terms(vis.g_bar[i], vis.g_bar[j], vis.x[i], vis.x[j])
-                        term1, term2 = self.separate_terms1(vis.g_bar[time, freq, i], vis.g_bar[time, freq, j], 
+                        term1, term2 = self.separate_terms(vis.g_bar[time, freq, i], vis.g_bar[time, freq, j], 
                                                             vis.x[time, freq, i], vis.x[time, freq, j])
                         # Put them in the right place in the bigger matrix
                         proj[k*2, k*2] = term1
@@ -891,11 +877,7 @@ class Sampler:
                 bm.add((split_re_im(v.obs_variance[time][freq])))
         N = bm.assemble()
         
-        bm = BlockMatrix()
-        for time in range(v.ntime):
-            for freq in range(v.nfreq):
-                bm.add(self.Cv)
-        Cv = bm.assemble()
+        Cv = self.Cv
         
         V_mean = split_re_im(np.ravel(self.V_mean))
         d = split_re_im(np.ravel(v.V_obs))
@@ -1131,7 +1113,7 @@ class Sampler:
 if __name__ == "__main__":
     from resource import getrusage, RUSAGE_SELF
 
-    sampler = Sampler(seed=99, niter=1000, burn_in=10, best_type="mean", random_the_long_way=False)
+    sampler = Sampler(seed=99, niter=1000, burn_in=10, best_type="mean", random_the_long_way=True)
     sampler.load_sim(4, ntime=1, nfreq=1, x_sigma=0)
     print("Likelihood before run", sampler.vis_true.get_unnormalized_likelihood(unity_N=True))   
     S = np.eye(sampler.nant()*2-1)*0.01
@@ -1145,8 +1127,6 @@ if __name__ == "__main__":
     usage = getrusage(RUSAGE_SELF)
     print("SIM", usage.ru_maxrss/1000.0/1000)      # Usage in GB
     
-    sampler.plot_corner(["x", "V"], threshold=0.8)
-
     exit()
     
     
