@@ -23,7 +23,7 @@ def gls_inv_covariance(proj, Ninv):
     """
     return inv(np.dot(proj.T, np.dot(Ninv, proj)))
 
-def generate_proj(g_bar, model):
+def generate_proj(g_bar, model, remove=True):
 
     def separate_real_imag(g0, g1, Vm):
         V = g0*g1*Vm
@@ -52,10 +52,10 @@ def generate_proj(g_bar, model):
                     k += 1
             
             
-            bm.add(remove_x_im(proj))
+            if remove: bm.add(remove_x_im(proj))
+            else: bm.add(proj)
 
     return bm.assemble()
-
 
 def gls_solve(vis):
     """

@@ -75,100 +75,27 @@ class BlockMatrix:
 
         return block_matrix
     
-class Alonso:
-    def __init__(self, num, alpha=0, xi=1):
-        nu_ref = 400
-        
-        alonso = lambda nu1, nu2: (nu_ref**2/nu1/nu2)**alpha*np.exp(-np.log(nu1/nu2)**2/(2*xi**2))
-            
-        # Setup two-step indexing
-        a = np.array_split(np.arange(405, 945, 1), num)
-        nu = [ np.mean(sub_a) for sub_a in a ]
-        
-        self.cov = np.zeros((num, num))
-        for i in range(num):
-            for j in range(num):
-                self.cov[i, j] = alonso(nu[i], nu[j])
-                
-        assert np.allclose(self.cov, self.cov.T)    # Check is symmetric
-        
-        val, vec = np.linalg.eig(self.cov)
-        if np.any(val<0):
-            val = np.where(val<0, 0, val)
-        
-            self.cov = np.dot(vec, np.dot(np.diag(val), np.linalg.inv(vec)))
+def fourier_operator(dsize):
+    """
+    Return a complex Fourier analysis operator for a given data dimension and number of Fourier modes.
+    Parameters
+    ----------
+    dsize : int
+        Size of data array.
 
-                
-    def average_signal(self, niter=10000):
-        samples = np.zeros((niter, self.cov.shape[0]))
-        mean = np.zeros(self.cov.shape[0])
-        for i in range(niter):
-            samples[i] = np.random.multivariate_normal(mean, C)
+    Returns
+    -------
+    F : array_like
+        Fourier matrix operator, of shape (Nmodes, Ndata)
+    """
+    nu = np.arange(dsize)
+    L = dsize
 
-        return np.mean(samples, axis=0)
-    
-def get_cov_matrix(ntime, nfreq, nant, diag=1.0, alpha=0, xi=1, correlate_time=False, 
-                correlate_freq=False, occupancy=False):
-    order = ("ntime", "nfreq", "nant")  
-    
-    def flat(t, f, a):
-        # Always time, freq, ant input, regardless of above order
-        layout = [ 0, 0, 0 ]
-        indexes = [ 0, 0, 0 ]
-        
-        where = order.index("ntime")
-        layout[where] = ntime
-        indexes[where] = t
-        where = order.index("nfreq")
-        layout[where] = nfreq
-        indexes[where] = f
-        where = order.index("nant")
-        layout[where] = nant
-        indexes[where] = a
-        return np.ravel_multi_index(indexes, layout)
-    
-    def indexes(i):
-        layout = [ 0, 0, 0 ]
-        
-        where = order.index("ntime")
-        layout[where] = ntime
-        where = order.index("nfreq")
-        layout[where] = nfreq
-        where = order.index("nant")
-        layout[where] = nant
-        
-        ind = np.unravel_index(i, layout)
-        
-        # Always time, freq, ant, output, regardless of above order
-        return ind[order.index("ntime")], ind[order.index("nfreq")], ind[order.index("nant")]
-    
-
-    # Setup matrix for nant
-    if occupancy:
-        cov_f = np.full((nfreq, nfreq), 1)
-        if correlate_time: cov_t = np.full((ntime, ntime), 1)
-    else:
-        cov_f = Alonso(nfreq, alpha, xi).cov
-        if correlate_time: cov_t = Alonso(ntime, alpha, xi).cov
-    
-    data = np.zeros((nant*ntime*nfreq, nant*ntime*nfreq))
-
-      
-    for i in range(data.shape[0]):
-        for j in range(data.shape[1]):
-            ti, fi, ai = indexes(i)
-            tj, fj, aj = indexes(j)
-
-            if correlate_time and ti != tj and fi == fj and ai == aj:       
-                    data[flat(ti, fi, ai), flat(tj, fj, aj)] = cov_t[ti, tj]
-            if correlate_freq and ti == tj and fi != fj and ai == aj:       
-                data[flat(ti, fi, ai), flat(tj, fj, aj)] = cov_f[fi, fj]
-            if i == j:
-                data[i, j] = cov_f[ti, tj]
-                
-
-                            
-    return data*diag/np.max(data)
+    # Construct frequency array (*not* in physical frequency units)
+    # Build matrix operator for complex Fourier basis
+    n = np.arange(-dsize//2, dsize//2)
+    F = np.array([np.exp(-2*np.pi*1.j * _n * nu / L) for _n in n])
+    return F/np.sqrt(dsize)
 
             
 

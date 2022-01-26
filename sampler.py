@@ -2,12 +2,13 @@ import matplotlib.pyplot as plt
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 from vis_creator import VisSim, VisCal, VisTrue
 from gls import gls_solve, generate_proj
-from calcs import split_re_im, unsplit_re_im, BlockMatrix, remove_x_im, restore_x_im, get_cov_matrix
+from calcs import split_re_im, unsplit_re_im, BlockMatrix, remove_x_im, restore_x_im
 import hera_cal as hc
 import corner
 import copy
 import numpy as np
 import scipy.linalg, scipy.sparse
+import pickle
 
 
 class Sampler:
@@ -114,9 +115,9 @@ class Sampler:
         self.file_root = ""
             
     def set_S_and_V_prior(self, S_diag, V_mean, Cv_diag):
-        self.S = get_cov_matrix(self.vis_redcal.ntime, self.vis_redcal.nfreq, self.vis_redcal.nant, S_diag)
+        self.S = S_diag
         self.V_mean = V_mean
-        self.Cv = get_cov_matrix(self.vis_redcal.ntime, self.vis_redcal.nfreq, self.vis_redcal.nant, Cv_diag)
+        self.Cv = Cv_diag
         
     def nant(self):
         return self.vis_redcal.nant
@@ -814,7 +815,12 @@ class Sampler:
         d = split_re_im(np.ravel(v.get_reduced_observed()))                     
         #d = split_re_im(v.get_reduced_observed1()) 
         
-        S = self.S
+        bm = BlockMatrix()
+        for time in range(v.ntime):
+            for freq in range(v.nfreq):
+                bm.add((self.S))
+        S = bm.assemble()
+        
 
         N_inv = np.linalg.inv(N)
         S_inv = np.linalg.inv(S)
@@ -877,13 +883,19 @@ class Sampler:
                 bm.add((split_re_im(v.obs_variance[time][freq])))
         N = bm.assemble()
         
-        Cv = self.Cv
+        bm = BlockMatrix()
+        for time in range(v.ntime):
+            for freq in range(v.nfreq):
+                bm.add(self.Cv)
+        Cv = bm.assemble()
+        
         
         V_mean = split_re_im(np.ravel(self.V_mean))
         d = split_re_im(np.ravel(v.V_obs))
 
         N_inv = np.linalg.inv(N)
         Cv_inv = np.linalg.inv(Cv)
+        
 
         # Only want x values to go +/-10% 
         # Fiddle with the prior widths
@@ -1113,7 +1125,7 @@ class Sampler:
 if __name__ == "__main__":
     from resource import getrusage, RUSAGE_SELF
 
-    sampler = Sampler(seed=99, niter=1000, burn_in=10, best_type="mean", random_the_long_way=True)
+    sampler = Sampler(seed=99, niter=1000, burn_in=10, best_type="mean", random_the_long_way=False)
     sampler.load_sim(4, ntime=1, nfreq=1, x_sigma=0)
     print("Likelihood before run", sampler.vis_true.get_unnormalized_likelihood(unity_N=True))   
     S = np.eye(sampler.nant()*2-1)*0.01
@@ -1121,6 +1133,7 @@ if __name__ == "__main__":
     Cv = np.eye(V_mean.shape[2]*2)
     sampler.set_S_and_V_prior(S, V_mean, Cv)
 
+    
     sampler.run()
     print("Likelihood after run", sampler.vis_sampled.get_unnormalized_likelihood(unity_N=True))   
     

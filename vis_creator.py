@@ -741,9 +741,90 @@ def perturb_vis(vis, vis_perturb_percent):
 
     return new_vis
 
+def group_by_x(a):
+    # Reshape so the dimensions are nant, ntime, nfreq
+    return np.moveaxis(a, 2, 0)
+
+def operator_reorder_x_after_fft(nt, nf,nx ): 
+    # For a single time
+    
+    # Make blocks by frequency and combine them
+
+    op = np.zeros((nx*2*nf, nx*2*nf)) 
+    k = 0
+    for ix in range(nx):            
+        for re_im in range(2):
+            for i in range(nf):
+                op[2*nx*i+ix*2+re_im, k] = 1
+                k += 1
+    
+    bm = BlockMatrix()
+    for t in range(nt):
+        bm.add(op)
+    
+    return bm.assemble()
+
+                         
+def multi_fft_operator(nt, nf, nx):
+    op = fourier_operator(nf)
+    bm = BlockMatrix()
+    for i in range(nt):
+        for j in range(nx):
+            for k in range(2):        # real/imag
+                bm.add(op)
+                
+    return bm.assemble()
 
 if __name__ == "__main__":
+    from gls import generate_proj
+    from calcs import fourier_operator
     
-    v = VisSim(4, ntime=3, nfreq=2)
-    print(v.get_unnormalized_likelihood(unity_N=True, over_all=False))
+    # Check d = A x
+    v = VisSim(4, ntime=2, nfreq=3)
+    A = generate_proj(v.g_bar, v.V_model, remove=False)
+    o = split_re_im(np.ravel(v.get_reduced_observed()))
+    x = np.ravel(split_re_im((v.x)))
+    p = np.dot(A, np.ravel(split_re_im((v.x))))
 
+    print("Tol", np.max(abs(o-p)/o))
+    
+    # Generate FFTd data
+    fft = fourier_operator(4)
+ 
+    x = group_by_x(v.x)
+    fft = np.fft.fft2(x)
+    y = np.fft.ifft2(fft)
+    
+    # New AF operator.
+    # The AF operator does this: receive a flat vector of floats
+    # which can be reshaped to a grid of dimensions (nant, ntime, nfreq, 2)
+    # The last 2 dimensions are the real/imag component of complex numbers
+    # so create a complex-valued array of shape (nant, ntime, nfreq)
+    # - Call np.fft.ifft2 on this array, which will do a 2-d inverse transform on the last two dimensions.
+    # Result is x.
+    # Move axis in x to produce an array of shape (ntime, nfreq, nant) which is complex valued.
+    # Flatten the array (ravel) and split the complex values into real/imag types. Result: Vector x_flat.
+    # Multiply this vector by the existing A operator, which will produce d, i.e. d = A x_flat
+    
+    # What does the A.T operator do. For a start, it must do things in the reverse order. That means 
+    # multiplying the existing A.T operator by something that is like d. This will produce a vector
+    # that is x-like, of shape flattened((ntime, nfreq, nant, 2)). Move axes and turn into a complex-valued
+    # array of shape (nant, ntime, nfreq). Now we apply the transpose of the inverse Fourier operator,
+    # which is the forward Fourier transform np.fft.fft2. The result of this is (nant, ntime, nfreq)
+    # which can be flattened to (nant, ntime, nfreq, 2).
+    
+            
+    
+   
+    
+    # FFT the x values over frequency then test the recovery
+    fft = fourier_operator(3)
+    x = split_x_group_freq(v.x)
+    for i in range(2):
+        for j in range(8):
+            x[i, j] = np.real
+
+    
+    FFT = multi_fft_operator(2, 3, 4)
+    print(FFT.shape)
+    
