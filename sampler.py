@@ -3,6 +3,7 @@ from mpl_toolkits.axes_grid1 import make_axes_locatable
 from vis_creator import VisSim, VisCal, VisTrue
 from gls import gls_solve, generate_proj
 from calcs import split_re_im, unsplit_re_im, BlockMatrix, remove_x_im, restore_x_im
+from fourier_ops import FourierOps
 import hera_cal as hc
 import corner
 import copy
@@ -730,6 +731,57 @@ class Sampler:
         self.sampled_x = sampled_x
         self.sampled_V = sampled_V
 
+    def r_draw(self, d, A, S, N, fops):
+        """
+        print(v.nvis, v.nant, v.ntime, v.nfreq, S.shape, N.shape, d.shape, A.shape)
+        
+        #6 4 2 3 (42, 42) (72, 72) (72,) (72, 42)
+        S: (nant*2)-1 * ntime*nfreq
+        ant: ntime*nfreq*(2*nant-1)
+        d: ntime*nfreq*nvis*2
+        N: ntime*nfreq*nvis*2  square
+        A: d x ant
+        """
+    
+        np.set_printoptions(linewidth=140, precision=4)
+        ntime = 4
+        nfreq = 4
+        nant = 4
+        nvis = 6  
+        print(A.shape)
+        forward = fops.AFT_Ninv_v(A, N, d); 
+        with_fft = fops.AF_v(A, forward)
+
+        without_fft = np.dot(A, np.dot(A.T, np.dot(np.linalg.inv(N), d)))
+        print(with_fft)
+        print(without_fft)
+        assert np.allclose(with_fft, without_fft)
+        exit()
+
+      
+        # [1 + sqrt(S)(A.T N-1 A)sqrt(S)]x = sqrt(S) A.TN-1 A d + random + sqrt(S)A.T sqrt(N_inv) random
+        S = np.eye(ntime* nfreq*(nant-1)*2+ntime*nfreq)
+        sqrt_S = self.sqrtm(S)
+        
+        # Work on the RHS
+
+        sqrt_S_AFT_Ninv_d = np.dot(sqrt_S, fops.AFT_Ninv_v(A, N, d))      
+        sqrt_S_AFT_sqrt_Ninv_omega = np.dot(sqrt_S, fops.AFT_Ninv_v(A, N, self.standard_random_draw(d.size)))  # Both random vectors are d-like
+        rhs = sqrt_S_AFT_Ninv_d+self.standard_random_draw(S.shape[0])+sqrt_S_AFT_sqrt_Ninv_omega
+        
+        # Work on the LHS
+        
+        square_bracket_term = fops.AFT_Ninv_v(A, N, fops.AF_v(A, np.sqrt(np.diag(S))))        # AF.T N_inv (AF sqrt(S))
+        square_bracket_term = np.dot(sqrt_S, square_bracket_term)                   # sqrt_S AF.T N_inv AF sqrt(S)
+
+        square_bracket_term = np.diag(np.full(S.shape[0], 1) + square_bracket_term)
+ 
+        x_proxy, _ = scipy.sparse.linalg.cg(square_bracket_term, rhs)             # Conjugate gradient
+        
+        s = np.dot(sqrt_S, x_proxy)
+        print(s.shape)
+       
+        exit()
                            
     def random_draw(self, first_term, A, S, N):
         N_inv = np.linalg.inv(N)
@@ -770,6 +822,10 @@ class Sampler:
             for freq in range(v.nfreq):
                 bm.add((self.S))
         S = bm.assemble()
+        
+        fops = FourierOps(v.ntime, v.nfreq, v.nant)
+        self.r_draw(d, A, S, N, fops)
+        
         
         return self.random_draw(np.dot(A.T, np.dot(np.linalg.inv(N), d)), A, S, N)
         
@@ -1125,8 +1181,8 @@ class Sampler:
 if __name__ == "__main__":
     from resource import getrusage, RUSAGE_SELF
 
-    sampler = Sampler(seed=99, niter=1000, burn_in=10, best_type="mean", random_the_long_way=False)
-    sampler.load_sim(4, ntime=1, nfreq=1, x_sigma=0)
+    sampler = Sampler(seed=99, niter=1000, burn_in=10, best_type="mean", random_the_long_way=True)
+    sampler.load_sim(4, ntime=4, nfreq=4, x_sigma=0)
     print("Likelihood before run", sampler.vis_true.get_unnormalized_likelihood(unity_N=True))   
     S = np.eye(sampler.nant()*2-1)*0.01
     V_mean = sampler.vis_redcal.V_model
@@ -1141,44 +1197,4 @@ if __name__ == "__main__":
     print("SIM", usage.ru_maxrss/1000.0/1000)      # Usage in GB
     
     exit()
-    
-    
-    cv_factor = 1
-    for i in range(10):
-        print("cv", cv_factor, "===================================================")
-        
-        s_factor = 1
-        
-        for j in range(10):
-            print("s", s_factor, "===================================================")
-            
-            sampler = Sampler(seed=99, niter=10000, burn_in=10, best_type="mean", random_the_long_way=False)
-            sampler.load_nr_sim("/scratch3/users/hgarsden/catall/calibration_points/viscatBC", 
-                            time_range=(0, 2), freq_range=(0, 2), remove_redundancy=False, initial_solve_for_x=False)  
-            print("Likelihood before run", sampler.vis_true.get_unnormalized_likelihood(over_all=True, unity_N=True))   
-
-            S = np.eye(sampler.nant()*2-1)*0.01*s_factor
-            V_mean = sampler.vis_redcal.V_model #*np.random.rand(sampler.vis_redcal.V_model.shape[0],
-                                                              #sampler.vis_redcal.V_model.shape[1],
-                                                              #sampler.vis_redcal.V_model.shape[2])
-            Cv = np.eye(V_mean.shape[2]*2)*cv_factor
-            sampler.set_S_and_V_prior(S, V_mean, Cv)
-
-            sampler.run()
-            print("Likelihood after run", sampler.vis_sampled.get_unnormalized_likelihood(over_all=True, unity_N=True))   
-            sampler.print_covcorr(["x", "V"], count_them=True, threshold=0.8)
-            
-            s_factor *= 1.3
-            
-            
-        cv_factor *= 1.3
-        
-    
-    
-    #sampler.plot_marginals("x", 5, time=0, freq=0); plt.clf()
-    #sampler.plot_trace("x", time=0, freq=0); plt.clf()
-    #sampler.plot_covcorr(["x", "V"],  time=0, freq=None); plt.clf()
-    #sampler.plot_sample_means(["x"],  time=0, freq=0); plt.clf()
-    #sampler.plot_results(time=0, freq=0); plt.clf()
-    #sampler.plot_gains(); plt.clf()
-    #sampler.plot_corner(["x", "V"], time=0, freq=0, threshold=0.8)
+  

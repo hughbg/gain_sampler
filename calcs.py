@@ -75,30 +75,6 @@ class BlockMatrix:
 
         return block_matrix
     
-def fourier_operator(dsize):
-    """
-    Return a complex Fourier analysis operator for a given data dimension and number of Fourier modes.
-    Parameters
-    ----------
-    dsize : int
-        Size of data array.
-
-    Returns
-    -------
-    F : array_like
-        Fourier matrix operator, of shape (Nmodes, Ndata)
-    """
-    nu = np.arange(dsize)
-    L = dsize
-
-    # Construct frequency array (*not* in physical frequency units)
-    # Build matrix operator for complex Fourier basis
-    n = np.arange(-dsize//2, dsize//2)
-    F = np.array([np.exp(-2*np.pi*1.j * _n * nu / L) for _n in n])
-    return F/np.sqrt(dsize)
-
-            
-
 if __name__ == "__main__":
     bm = BlockMatrix()
     bm.add(np.array([1, 1]))

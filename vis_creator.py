@@ -94,6 +94,8 @@ class VisSim:
             for freq in range(nfreq):              
                 re = np.random.normal(scale=x_sigma, size=nant)
                 im = np.random.normal(scale=x_sigma, size=nant)
+                # The imag value for the last antenna should be 0
+                im[-1] = 0
                 x[time, freq] = re+1j*im
 
         self.nant = nant
@@ -777,54 +779,14 @@ def multi_fft_operator(nt, nf, nx):
 
 if __name__ == "__main__":
     from gls import generate_proj
-    from calcs import fourier_operator
     
     # Check d = A x
     v = VisSim(4, ntime=2, nfreq=3)
     A = generate_proj(v.g_bar, v.V_model, remove=False)
     o = split_re_im(np.ravel(v.get_reduced_observed()))
     x = np.ravel(split_re_im((v.x)))
+    print(A.shape, np.ravel(split_re_im((v.x))).shape)
     p = np.dot(A, np.ravel(split_re_im((v.x))))
 
     print("Tol", np.max(abs(o-p)/o))
-    
-    # Generate FFTd data
-    fft = fourier_operator(4)
- 
-    x = group_by_x(v.x)
-    fft = np.fft.fft2(x)
-    y = np.fft.ifft2(fft)
-    
-    # New AF operator.
-    # The AF operator does this: receive a flat vector of floats
-    # which can be reshaped to a grid of dimensions (nant, ntime, nfreq, 2)
-    # The last 2 dimensions are the real/imag component of complex numbers
-    # so create a complex-valued array of shape (nant, ntime, nfreq)
-    # - Call np.fft.ifft2 on this array, which will do a 2-d inverse transform on the last two dimensions.
-    # Result is x.
-    # Move axis in x to produce an array of shape (ntime, nfreq, nant) which is complex valued.
-    # Flatten the array (ravel) and split the complex values into real/imag types. Result: Vector x_flat.
-    # Multiply this vector by the existing A operator, which will produce d, i.e. d = A x_flat
-    
-    # What does the A.T operator do. For a start, it must do things in the reverse order. That means 
-    # multiplying the existing A.T operator by something that is like d. This will produce a vector
-    # that is x-like, of shape flattened((ntime, nfreq, nant, 2)). Move axes and turn into a complex-valued
-    # array of shape (nant, ntime, nfreq). Now we apply the transpose of the inverse Fourier operator,
-    # which is the forward Fourier transform np.fft.fft2. The result of this is (nant, ntime, nfreq)
-    # which can be flattened to (nant, ntime, nfreq, 2).
-    
-            
-    
-   
-    
-    # FFT the x values over frequency then test the recovery
-    fft = fourier_operator(3)
-    x = split_x_group_freq(v.x)
-    for i in range(2):
-        for j in range(8):
-            x[i, j] = np.real
-
-    
-    FFT = multi_fft_operator(2, 3, 4)
-    print(FFT.shape)
     
