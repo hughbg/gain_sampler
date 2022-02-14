@@ -1,6 +1,12 @@
 
 # Gain_sampler
 
+Sample distributions of gains g and sky model V based on the simple calibration equation:
+
+d<sub>ij</sub> = g<sub>i</sub>g<sub>j</sub>* V<sub>ij</sub>
+
+d is the observed visibilities.
+
 ## Requirements
 
 The `return_more_vals`branch of `hera_cal` must be used. It returns extra values that are needed for bluecal.
