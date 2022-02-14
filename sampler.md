@@ -16,18 +16,46 @@ vis_redcal
 vis_true
 > A simulator object. If a simple simulation has been loaded, this will be the same as vis\_redcal.
 >.
-> If a HERA non-redundant-pipeline simulation has been loaded (load\_nr\_sim()), then this contains the true model and gains. What these mean will be described in the class descriptions.
+> If a HERA non-redundant-pipeline simulation has been loaded (load\_nr\_sim()), then this contains the true model and gains. What these mean will be described in the [class descriptions](sim_classes.md).
 
 samples
 > This is dictionary and contains the samples taken during the Gibbs sampling. The samples are in order of the sampling iterations, but burn-in has been removed. The dictionary contains "x", "g" and "V" samples. 
 A "sample" is a 3-D array of shape (ntime, nfreq, nant or nbaseline). There is a sample for each iteration of the Gibbs sampling. The values are complex. Example: samples["V"][1000] gives an array which is the V values from the 1000'th iteration of the Gibbs sampling (after burn-in). The V values array is of shape (nant, nfreq, nbaseline).
 > 
-> The gains g are not actually sampled, it is the gain perturbations x that are sampled. However, new gains can be calculated from the new sampled x values using g = g_bar*(1+x).
+> The gains g are not actually sampled, it is the gain perturbations x that are sampled. However, "gain samples" are calculated from the new sampled x values using g = g_bar*(1+x).
 > 
 > The sampling has to be run to get the samples.
 
 vis_sampled
->This is a copy of vis\_redcal, but there are two changes: the x values are the "best" obtained from the sampling, the same for the V values. So x and V are changed to contain the results from sampling, all other simulation values are unaltered. What "best" means depends on how this was specified when Sampler was created.
+>This is a copy of vis\_redcal, but there are two changes: the x values are the "best" obtained from the sampling, and the same for the V values. So x and V are changed to contain the results from sampling, all other simulation values are unaltered. What "best" means depends on how this was specified when Sampler was created.
+
+
+To summarize  the 3 visibility data objects:
+
+
+
+
+If a simple sim is loaded via load\_sim(), the 3 visibility objects contain:
+
+|vis\_redcal   and vis\_true | vis\_sampled| Comment |
+| :----------- | :------------------: |:---: |
+| V\_obs\_sim     | V\_obs\_sim | The same |
+| g\_bar\_sim   | g\_bar\_sim| The same |
+| x\_sim          | x\_samp  | Not the same |
+| V\_sim     | V\_samp | Not the same |
+
+
+If a non-redundant-pipeline sim is loaded via load\_nr\_sim():
+
+|vis\_redcal      |vis\_true | vis\_sampled| Comment |
+| :----------- | :------------------: | :------------:| :---: |
+| V\_obs\_sim      | V\_obs\_sim       | V\_obs\_sim | All the same |
+| g\_bar\_cal   | g\_bar\_sim     | g\_bar\_cal| Sampled has the same as vis\_redcal |
+| x = 0       |   x = 0    | x\_samp  |  x exists only after sampling
+| V\_cal   | V\_sim  | V\_samp | Not the same |
+
+
+All these values can be compared against each other.
 
 
 
@@ -43,7 +71,6 @@ These fall into 2 categories: setting up and running the sampler, and looking at
     def nvis(self):
     def run(self):
     def plot_marginals(self, parameter, cols, time=None, freq=None, which=[ "True", "Redcal", "Sampled" ]):
-        def plot_hist(a, fname, label, sigma_prior, other_vals, index):
     def plot_corner(self, parameters, time=None, freq=None, threshold=0.0, xgs=None, Vs=None):
     def plot_trace(self, parameter, time=None, freq=None, index=None):
     def print_covcorr(self, parameters, time=None, freq=None, stat="corr", threshold=0.0, list_them=False, count_them=False):
