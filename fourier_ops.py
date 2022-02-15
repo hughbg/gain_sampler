@@ -1,6 +1,8 @@
 import numpy as np
 from calcs import split_re_im, unsplit_re_im, remove_x_im, restore_x_im
 
+SQRT_2 = np.sqrt(2)
+
 class FourierOps:
     
     def __init__(self, ntime, nfreq, nant):
@@ -8,6 +10,18 @@ class FourierOps:
         self.nfreq = nfreq
         self.nant = nant
         
+    def fft2_normed(self, data):
+        return np.fft.fft2(data)/data.shape[0]
+    
+    def ifft2_normed(self, data):
+        return np.fft.ifft2(data)*data.shape[0]
+
+    def rfft2_normed(self, data):
+        return SQRT_2*np.fft.fft2(data)/data.shape[0]
+    
+    def rifft2_normed(self, data):
+        return (np.fft.ifft2(data)*data.shape[0])/SQRT_2
+ 
     def condense_real_fft(self, a):
         # a: complex 2-D FFT of real values
 
@@ -35,7 +49,7 @@ class FourierOps:
         """ 
         AF.T Ninv multiplied by some vector. The vector has to be d-like and returns FFT of x-like.
 
-        AF is an inverse FFT followed by the old A. A.T is the old A.T followed by an FFT, (in procedural terms).
+        AF is an inverse FFT followed by the old A. AF.T is the old A.T followed by an FFT, (in procedural terms).
         It's too tricky at this stage to generate AF.T N_inv itself, which could be multiplied into a 
         vector later.
         """
@@ -48,14 +62,14 @@ class FourierOps:
         result = restore_x_im(result)              # Add the missing x value for each time/freq. (Is missing for DOF fix). It is 0.
         result = unsplit_re_im(result)             # 2 lines reform to complex N-D arrayfor a Fourier transform 
         result = np.moveaxis(result, 2, 0)         # Make the axes (self.nant, self.ntime, self.nfreq) i.e. ant first. The array for the last ant has only real values.
-        result = np.fft.fft2(result)                  
+        result = self.fft2_normed(result)                  
         condensed = self.condense_real_fft(result[-1])       # The last antenna FFT which is of real values needs to be stripped to unique values
         result = np.append(split_re_im(np.ravel(result[:-1])), condensed)                # flatten and split, now length is (self.nant-1)*self.ntime*self.nfreq*2+1*self.ntime*self.nfreq
         assert result.size == (self.nant-1)*self.ntime*self.nfreq*2+self.ntime*self.nfreq
 
         return result                           # This is a vector of FFT(x) with no values missing
 
-    # Whay we can't just put zeros in S for the real FFT components. Because the FFT
+    # Why we can't just put zeros in S for the real FFT components. Because the FFT
     # components are more than just zeros, they have to be conjugates of each other and
     # ordered. This can't be done with the prior.
 
@@ -108,11 +122,12 @@ class FourierOps:
         result = unsplit_re_im(fft[:-self.ntime*self.nfreq])                       # 3 lines reshape to complex array (self.nant-1, self.ntime, self.nfreq)
         result = np.reshape(result, (self.nant-1, self.ntime, self.nfreq))    
         result = np.append(result, [expanded], axis=0)                     # Tack on last antenna
-        result = np.fft.ifft2(result)        
+        result = self.ifft2_normed(result)    
+        assert np.sum(result[3].imag) == 0           # All the imag should be 0
         result = np.moveaxis(result, 0, 2)           # Make the axes (self.ntime, self.nfreq, self.nant)
         result = remove_x_im(split_re_im(result))    # Remove one imaginary x value in each time/freq   
         result = np.ravel(result)                    # Flatten, now length is self.ntime*self.nfreq*(self.nant*2-1)
-        result = np.dot(A, result)                   # Now length is self.ntime*self.nfreq*nvis*2
+        result = np.dot(A, result)                   # Now length is self.ntime*self.nfreq*nvis*2, if A is the projection matrix
 
         return result
 

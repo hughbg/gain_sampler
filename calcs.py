@@ -52,7 +52,7 @@ class BlockMatrix:
         self.matrices_incoming = []
     
     def add(self, a, replicate=1):
-        assert len(a.shape) <= 2, "Can't assemble block matrix with dimensions > 2"
+        assert len(a.shape) <= 2, "Can't assemble block matrix with more than 2 dimensions"
         for i in range(replicate):
             self.matrices_incoming.append(a)
         

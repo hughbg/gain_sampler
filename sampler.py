@@ -10,6 +10,7 @@ import copy
 import numpy as np
 import scipy.linalg, scipy.sparse
 import pickle
+import time
 
 
 class Sampler:
@@ -83,14 +84,8 @@ class Sampler:
             are applied to gains in the redcal calibrated solution. Hence improving the
             redcal solution.
 
-        Returns
-        -------
-        vis : ndarray of complex
-            Array of visibilities at each LST and frequency appropriate
-            for the given sky temperature model, beam size model, and
-            baseline vector. Returned in units of Jy with shape
-            (lsts.size, freqs.size).
         """
+        
 
         print("Loading NR sim from", file_root)
         self.vis_redcal = VisCal(file_root, time_range=time_range, freq_range=freq_range, remove_redundancy=remove_redundancy) 
@@ -98,6 +93,7 @@ class Sampler:
 
         if initial_solve_for_x:
             self.vis_redcal.x = self.vis_redcal.initial_vals.x = gls_solve(self.vis_redcal)
+            
             
         # Indexes into the original simulated data
         self.time_range = time_range
@@ -130,6 +126,7 @@ class Sampler:
     def run(self):
         if not hasattr(self,"vis_true"):
             raise RuntimeError("No sim loaded. Can't sample.")
+        print(time.time())
             
         print("Running sampling")
         sampled_x = np.zeros((self.niter, self.vis_redcal.ntime, self.vis_redcal.nfreq, self.vis_redcal.nant),
@@ -167,6 +164,7 @@ class Sampler:
             
             new_x = self.reform_x_from_samples(sample, self.vis_redcal.x.shape) 
             sampled_x[i] = new_x
+            print(time.time()); exit()
             
         sampled_x = sampled_x[(self.niter*self.burn_in)//100:]
         sampled_V = sampled_V[(self.niter*self.burn_in)//100:]
@@ -733,6 +731,7 @@ class Sampler:
 
     def r_draw(self, d, A, S, N, fops):
         """
+        does the dynamic range fixup.
         print(v.nvis, v.nant, v.ntime, v.nfreq, S.shape, N.shape, d.shape, A.shape)
         
         #6 4 2 3 (42, 42) (72, 72) (72,) (72, 42)
@@ -742,46 +741,31 @@ class Sampler:
         N: ntime*nfreq*nvis*2  square
         A: d x ant
         """
-    
-        np.set_printoptions(linewidth=140, precision=4)
-        ntime = 4
-        nfreq = 4
-        nant = 4
-        nvis = 6  
-        print(A.shape)
-        forward = fops.AFT_Ninv_v(A, N, d); 
-        with_fft = fops.AF_v(A, forward)
-
-        without_fft = np.dot(A, np.dot(A.T, np.dot(np.linalg.inv(N), d)))
-        print(with_fft)
-        print(without_fft)
-        assert np.allclose(with_fft, without_fft)
-        exit()
-
-      
+       
         # [1 + sqrt(S)(A.T N-1 A)sqrt(S)]x = sqrt(S) A.TN-1 A d + random + sqrt(S)A.T sqrt(N_inv) random
-        S = np.eye(ntime* nfreq*(nant-1)*2+ntime*nfreq)
+
         sqrt_S = self.sqrtm(S)
+        
         
         # Work on the RHS
 
         sqrt_S_AFT_Ninv_d = np.dot(sqrt_S, fops.AFT_Ninv_v(A, N, d))      
-        sqrt_S_AFT_sqrt_Ninv_omega = np.dot(sqrt_S, fops.AFT_Ninv_v(A, N, self.standard_random_draw(d.size)))  # Both random vectors are d-like
+        sqrt_S_AFT_sqrt_Ninv_omega = np.dot(sqrt_S, fops.AFT_Ninv_v(A, N, self.standard_random_draw(d.size), sqrt_N=True))  
         rhs = sqrt_S_AFT_Ninv_d+self.standard_random_draw(S.shape[0])+sqrt_S_AFT_sqrt_Ninv_omega
         
         # Work on the LHS
         
         square_bracket_term = fops.AFT_Ninv_v(A, N, fops.AF_v(A, np.sqrt(np.diag(S))))        # AF.T N_inv (AF sqrt(S))
         square_bracket_term = np.dot(sqrt_S, square_bracket_term)                   # sqrt_S AF.T N_inv AF sqrt(S)
-
         square_bracket_term = np.diag(np.full(S.shape[0], 1) + square_bracket_term)
  
         x_proxy, _ = scipy.sparse.linalg.cg(square_bracket_term, rhs)             # Conjugate gradient
         
         s = np.dot(sqrt_S, x_proxy)
-        print(s.shape)
-       
-        exit()
+        
+        x = fops.AF_v(np.eye(A.shape[1]), s)       # Just converts s to x
+
+        return x
                            
     def random_draw(self, first_term, A, S, N):
         N_inv = np.linalg.inv(N)
@@ -817,14 +801,9 @@ class Sampler:
         d = split_re_im(np.ravel(v.get_reduced_observed()))                     
         #d = split_re_im(v.get_reduced_observed1()) 
         
-        bm = BlockMatrix()
-        for time in range(v.ntime):
-            for freq in range(v.nfreq):
-                bm.add((self.S))
-        S = bm.assemble()
         
         fops = FourierOps(v.ntime, v.nfreq, v.nant)
-        self.r_draw(d, A, S, N, fops)
+        return self.r_draw(d, A, np.diag(self.S), N, fops)
         
         
         return self.random_draw(np.dot(A.T, np.dot(np.linalg.inv(N), d)), A, S, N)
@@ -1180,18 +1159,25 @@ class Sampler:
 
 if __name__ == "__main__":
     from resource import getrusage, RUSAGE_SELF
+    from s_manager import SManager
+    import matplotlib.pyplot as plt
 
-    sampler = Sampler(seed=99, niter=1000, burn_in=10, best_type="mean", random_the_long_way=True)
-    sampler.load_sim(4, ntime=4, nfreq=4, x_sigma=0)
+    sampler = Sampler(seed=99, niter=10, burn_in=10, best_type="mean", random_the_long_way=True)
+    sampler.load_sim(4, ntime=16, nfreq=16, x_sigma=0)
     print("Likelihood before run", sampler.vis_true.get_unnormalized_likelihood(unity_N=True))   
-    S = np.eye(sampler.nant()*2-1)*0.01
+    gauss = lambda x, y: np.exp(-0.5*(x**2+y**2)/.05)
+    dc = lambda x, y: 1 if x==0 and y == 0 else 0
+    sm = SManager(16, 16, 4)
+    S = sm.generate_S(gauss);
     V_mean = sampler.vis_redcal.V_model
     Cv = np.eye(V_mean.shape[2]*2)
     sampler.set_S_and_V_prior(S, V_mean, Cv)
 
-    
-    sampler.run()
-    print("Likelihood after run", sampler.vis_sampled.get_unnormalized_likelihood(unity_N=True))   
+    #sampler.run()
+    x = sampler.x_random_draw(sampler.vis_redcal)
+    x = np.reshape(unsplit_re_im(x[:512]), (16, 16))
+    plt.plot(x[7].imag)
+    plt.savefig("x")
     
     usage = getrusage(RUSAGE_SELF)
     print("SIM", usage.ru_maxrss/1000.0/1000)      # Usage in GB
