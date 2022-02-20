@@ -15,8 +15,8 @@ class VisSim:
         
         V_obs[k] = V_model[k] g[i] conj(g[j]) (1 + x[i]) (1 + conj(x[j]))   ["exact"]
         
-    depending on the "level" of exactness to be applied (approx/exact). GLS can only use
-    the first form.
+    depending on the "level" of exactness to be applied (approx/exact). GLS and sampling
+    can only use the first form.
         
     Simulated values are stored in the object. If any of them are perturbed from their 
     initial values after initialization, the equation above will not hold.
@@ -27,7 +27,7 @@ class VisSim:
     
  
     def __init__(self, nant, ntime=1, nfreq=1, vis_model_sigma=1000, gain_sigma=3, x_sigma=0.1, obs_variance=10+10j, 
-                 level="approx", redundant=False):
+                 add_noise=False, level="approx", redundant=False):
         """
         Parameters
         ----------
@@ -114,6 +114,13 @@ class VisSim:
 
         self.model_projection = self.get_model_projection()
         self.V_obs = self.get_simulated_visibilities()
+        
+        if add_noise:
+            re = np.random.normal(scale=np.sqrt(obs_variance.real), size=self.nvis)
+            im = np.random.normal(scale=np.sqrt(obs_variance.imag), size=self.nvis)
+            self.V_obs += re+im*1j
+            self.noise_added = True
+        else: self.noise_added = False
 
 
     def get_simulated_visibilities(self, show_working=False):
@@ -170,8 +177,7 @@ class VisSim:
 
     def get_antenna_gains(self):
         """
-        Calculate the antenna gains by incorporating the gain offsets for all 
-        antennas.
+        Calculate the antenna gains by incorporating the gain offsets for all antennas.
         
             gain[k] = g[k] (1 + x[k])
         
@@ -179,10 +185,15 @@ class VisSim:
         -------
         
         array_like
-            The gains, indexed by antenna.
+            The gains, indexed by time/freq/antenna.
         """
         
         return self.g_bar*(1+self.x)
+    
+    def fold_x_into_gains(self):
+        self.g_bar *= 1+self.x
+        self.x = np.zeros_like(self.x)
+        
     
 
     def get_reduced_observed(self):
@@ -253,36 +264,51 @@ class VisSim:
         return self.V_obs/self.get_baseline_gains()
     
 
-    def get_unnormalized_likelihood(self, over_all=False, unity_N=False):
+    def get_unnormalized_likelihood(self, over_all=False):
         """
         Calculate the RMS of the real/imag values from get_diff_obs_sim()
+        
+       
         """
+        
+        def likelihood(diffs, n_inv, det):
+            if not self.noise_added: n_inv = np.eye(n_inv.shape[0])
+            lkhd = np.exp(-0.5*np.dot(diffs, np.dot(n_inv, diffs)))
+            return lkhd
+            sqrt_2_pi = np.sqrt(2*np.pi)
+            for i in range(n_inv.shape[0]):
+                lkhd /= sqrt_2_pi
+
+            return lkhd/np.sqrt(det)
+
 
         dy = self.V_obs-self.get_simulated_visibilities()
+
            
         if over_all:
             dy_all = split_re_im(np.ravel(dy))
-            N_inv_all = BlockMatrix()
+            N_all = BlockMatrix()
             for time in range(self.ntime):
                 for freq in range(self.nfreq):
-                    if unity_N:
-                        N_inv_all.add(np.diag(np.full(self.obs_variance[time][freq].size*2, 1)))
-                    else: 
-                        N_inv_all.add(np.linalg.inv(np.diag(split_re_im(self.obs_variance[time][freq]))))
-            N_inv_all = N_inv_all.assemble()
-            
-            return np.exp(-0.5*np.dot(dy_all, np.dot(N_inv_all, dy_all)))
+                    N_all.add(np.diag(split_re_im(self.obs_variance[time][freq])))
+            N_all = N_all.assemble()
+
+            determinant = np.prod(np.diag(N_all))
+            # N is diagonal so inverse is easy
+            N_inv_all = np.diag(1/np.diag(N_all))
+
+            return likelihood(dy_all, N_inv_all, determinant)
         
         else:
             likelihoods = np.zeros((self.ntime, self.nfreq))
             for time in range(self.ntime):
                 for freq in range(self.nfreq):
                     dy_tf = split_re_im(dy[time, freq])
-                    if unity_N:
-                        N_inv = np.diag(np.full(self.obs_variance[time][freq].size*2, 1))
-                    else:
-                        N_inv = np.linalg.inv(np.diag(split_re_im(self.obs_variance[time][freq])))
-                    likelihoods[time, freq] = np.exp(-0.5*np.dot(dy_tf, np.dot(N_inv, dy_tf)))
+                    N = np.diag(split_re_im(self.obs_variance[time][freq]))
+                    determinant = np.prod(np.diag(N))
+                    N_inv = np.diag(1/np.diag(N))
+                    likelihoods[time, freq] = likelihood(dy_tf, N_inv, determinant)
+                    
             return likelihoods
                     
     
@@ -741,40 +767,8 @@ def perturb_vis(vis, vis_perturb_percent):
 
     return new_vis
 
-def group_by_x(a):
-    # Reshape so the dimensions are nant, ntime, nfreq
-    return np.moveaxis(a, 2, 0)
-
-def operator_reorder_x_after_fft(nt, nf,nx ): 
-    # For a single time
-    
-    # Make blocks by frequency and combine them
-
-    op = np.zeros((nx*2*nf, nx*2*nf)) 
-    k = 0
-    for ix in range(nx):            
-        for re_im in range(2):
-            for i in range(nf):
-                op[2*nx*i+ix*2+re_im, k] = 1
-                k += 1
-    
-    bm = BlockMatrix()
-    for t in range(nt):
-        bm.add(op)
-    
-    return bm.assemble()
 
                          
-def multi_fft_operator(nt, nf, nx):
-    op = fourier_operator(nf)
-    bm = BlockMatrix()
-    for i in range(nt):
-        for j in range(nx):
-            for k in range(2):        # real/imag
-                bm.add(op)
-                
-    return bm.assemble()
-
 if __name__ == "__main__":
     from gls import generate_proj
     from calcs import fourier_operator

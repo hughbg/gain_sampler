@@ -21,21 +21,33 @@ class Sampler:
     niter : int
         How many iterations of Gibbs sampling to execute.
     burn_in : float
-        The percentage of samples to throw away at the beginning.
+        The percentage of samples to throw away at the beginning. Note: percentage.
         Must be 0-99.
     seed : float
-        Set this as a random seed, so that sampling runs can be repeated.
+        Set this as a random seed, so that sampling runs can be repeated. The same seed
+        will give the same results. Otherwise, randomness means they won't be repeated.
     random_the_long_way : bool
-        If true, draw random sampled for Gibbs sampling using contrained realization equations.
+        If true, draw random samples for Gibbs sampling using contrained realization equations.
         Otherwise, use the equivalent multivariate Gaussian and draw samples from that.
+        The Gaussian is more efficient for small amounts of data, e.g. small number of antennas,
+        times frequencies.
+    use_conj_grad: bool
+        Only used if random_the_long_way is True. It is a particular method of solving equations like
+        Ax = b that is required to be done when taking a sample. It is good when there is a high dynamic range
+        in the values.
     best_type: str
         After sampling, the "best" samples are selected and used as the "result" of sampling.
         This parameter indicates how to select the best samples. There are three options:
-        "mean": Get the mean value of each x, V sampled value.
-        "peak": Form histograms and get the peak of the histogram, for each x, V sampled value.
+        "mean": Get the mean value of each element of x, V sampled vectors. This works ok
+            if the values are Gauusian distributed and should be similar to the peak. This method
+            and the next ("peak") are affected by the distributions of each value.
+        "peak": Form histograms of each element of x, V vectors over all the samples and get the peak of the histogram.
+            Histograms are like those in the corner plot marginals.
         "ml": Find the set of samples that has the highest likelihood. This is different from
             the previous two options because it operates on the complete set of parameters at each
-            sampling step, intead of treating each parameter individually.
+            sampling step. Instead of treating each value in the x, V samples individually, it will use the entire
+            x and V vectors at a particular sampling step to simulate observed visibilities and calculated
+            the likelihood (normalized to a max of 1). The sampling step with the highest likelihood is the best.
     """
     
     def __init__(self, niter=1000, burn_in=10, seed=None, random_the_long_way=False, use_conj_grad=True, best_type="mean"):
@@ -58,37 +70,35 @@ class Sampler:
     
     def load_nr_sim(self, file_root, time_range=None, freq_range=None, remove_redundancy=False, initial_solve_for_x=False):
         """
-        Load a simulation from the Non-Redundant pipeline.
+        Load a simulation from the Non-Redundant pipeline. https://github.com/philbull/non-redundant-pipeline/.
 
         Parameters
         ----------
         file_root : str
             The pattern that will be used to find all the files associated with the simulation.
             Example: /scratch3/users/hgarsden/catall/calibration_points/viscatBC
-            The file_root string will be extended to form actual file names.
+            The file_root string will be extended to form actual file names. The file names
+            are specific to the pipeline and the load routines know what they are.
         time_range : tuple of 2 integers or None
             (start_time_index, end_time_index)
             Indexes into the simulation that specify a chunk of time to use from the
-            simulation. The range is Python style so it is up to but not including
-            end_time_index.
-            If None, then all times are used.
+            simulation. The indexes are indexes into the array of times and not actual times themselves.
+            For example (0, 10) selects the first 10 times. These will be loaded.
+            The range is Python style so it is up to but not including end_time_index.
+            If None, then all times are loaded. Times (and frequencies) can later
+            be selected for the purposes of sampling.
         freq_range: tuple of 2 integers or None
             Like time_range but specifies a chunk of frequencies.
         remove_redundancy: bool
-            If True: remove the redundant sets of baselines and place each baseline 
-            into its own redundant set.
+            If True, remove the redundant sets of baselines and place each baseline 
+            into its own redundant set. Gets rid of any knowledge of redundancy, so that 
+            all baselines appear non-redundant.
         initial_solve_for_x : bool
             If True: Use a generalized least squares solver to generate x offsets that
-            are applied to gains in the redcal calibrated solution. Hence improving the
-            redcal solution.
+            are applied to gains in the redcal calibrated solution. The x values are not 
+            stored but the gains g_bar are altered. vis_redcal and vis_true do not have
+            x values. vis_sampled will have x values that are the result of sampling.
 
-        Returns
-        -------
-        vis : ndarray of complex
-            Array of visibilities at each LST and frequency appropriate
-            for the given sky temperature model, beam size model, and
-            baseline vector. Returned in units of Jy with shape
-            (lsts.size, freqs.size).
         """
 
         print("Loading NR sim from", file_root)
@@ -97,6 +107,8 @@ class Sampler:
 
         if initial_solve_for_x:
             self.vis_redcal.x = self.vis_redcal.initial_vals.x = gls_solve(self.vis_redcal)
+            self.vis_redcal.fold_x_into_gains()
+            
             
         # Indexes into the original simulated data
         self.time_range = time_range
@@ -106,18 +118,76 @@ class Sampler:
             
             
     def load_sim(self, nant, ntime=1, nfreq=1, initial_solve_for_x=False, **kwargs):
-
+        """
+        Load a simple simulation (VisSim) so that it can be used for sampling.
+        
+        All values are randomly generated except of the observed visibilities, which
+        are calculated as:
+        
+            V_obs,ij = gi gj Vij (1+xi+xj)
+            
+        
+        Parameters
+        ----------
+        
+        nant: int
+            Specify the number of antennas. From these the number of baselines will
+            also be set.
+        ntime: int
+            The number of times to simulate.
+        nfreq: integers
+            The number of frequencies to generate.
+        initial_solve_for_x : bool
+            If True: Use a generalized least squares solver to generate x offsets that
+            are applied to gains. The x values are not stored but the gains g_bar are altered. 
+            The new x values will be different than the origibal simulated ones because they
+            they enforce a solution to phase degeneracy by setting the imaginary value in
+            the last x value to 0.
+            
+        Other arguments in kwargs are passed to VisSim.
+            
+        
+        """
+        
         self.vis_redcal = VisSim(nant, ntime=ntime, nfreq=nfreq, **kwargs)
-        self.vis_true = self.vis_redcal
         if initial_solve_for_x:
             self.vis_redcal.x = self.vis_redcal.initial_vals.x = gls_solve(self.vis_redcal)
+            self.vis_redcal.fold_x_into_gains()
+        self.vis_true = self.vis_redcal
 
         self.file_root = ""
             
-    def set_S_and_V_prior(self, S_diag, V_mean, Cv_diag):
-        self.S = S_diag
+    def set_S_and_V_prior(self, S, V_mean, Cv):
+        """ 
+        Set information to constrain the distribution of the sampled x offsets and V values.
+        
+        To do sampling the expected mean and covariance of the x and V values must be specified.
+        The mean of the x values is 0, so is not specified here. The covariance of the x values
+        is S, and the mean and covariance of the V values is V_mean and Cv.
+        
+        There may be multiple times and frequencies in the data, however the values set here
+        are used for all times and frequencies, thus it is not possible to set different values
+        for different times/frequencies.
+        
+        
+        Parameters
+        ----------
+        S: 2-D array of float
+            Must be a square array of dimension equal to the number of antennas times 2.
+            The factor of 2 is used because complex antenna values are split into their
+            real/imag components.
+        V_mean: 2-D array of float
+            Must be the same shape as the V in the simulation. For each V in the simulation
+            there is a corresponding V_mean. It is convenient to use the sim V values for V_mean,
+            or take a copy of V and alter the values, then use that for V_mean.
+        Cv: 2-D array of float
+            Must be a square array of dimension equal to the number of baselines times 2.
+        """
+            
+
+        self.S = S
         self.V_mean = V_mean
-        self.Cv = Cv_diag
+        self.Cv = Cv
         
     def nant(self):
         return self.vis_redcal.nant
@@ -127,6 +197,31 @@ class Sampler:
     
                    
     def run(self):
+        """
+        Run the sampler after loading a simulation and setting S, V_mean, Cv.
+        
+        Runs Gibbs sampling based on the values of the sim in vis_redcal. 
+        vis_redcal is copied to to vis_x_sammpling and vis_model_sampling, and
+        these store temporary values for x and V during the sampling. The iterations
+        go like this:
+        
+        repeat:
+            Put an x vector in v_model_sampling 
+            Sample a new model vector from v_model_sampling
+            Put the model vector in v_x_sampling
+            Sample a new x value
+            
+        This function creates some new objects inside the Sampler object -
+        samples: dictionary
+            Contains the samples of the x and V vectors i.e. samples["x"] and samples["V"].
+            Also contains samples["g"] which are calculated from x ang g_bar. The samples
+            are in a 3-D array with shape (ntime, nfreq, nant). The values are complex.
+        vis_sampled: copy of loaded simulation
+            The best x array from the sampling is placed in here, and the best V values
+            from the sampling overwrite the V values that were loaded from the sim.
+        
+        """
+        
         if not hasattr(self,"vis_true"):
             raise RuntimeError("No sim loaded. Can't sample.")
             
@@ -186,6 +281,29 @@ class Sampler:
         self.vis_sampled.V_model = best_vals["V"]
     
     def select_samples_by_time_freq(self, what, time=None, freq=None):
+        """
+        Select x, V, or g samples for a particular time/freq in the sim.
+        
+        g is not actually sampled as part of the Gibbs sampling, but g values
+        are calculated from the sampled x values and g_bar.
+        
+        Parameters
+        ----------
+        what: string
+            Must be x, g, or V. 
+        time, freq: int
+            The number indicates the index of the time/freq in the sim, 
+            They are not times or frequencies in physical units.
+            
+        Returns
+        -------
+            4-D array
+                The first index into the array is the sample iteration number (ex. burn-in)
+                Each element of the array is a 3-D array of x or g or V values where the first
+                two indexes in that array are time and frequency, and the third index is antenna
+                (x, g) or baseline(V). The values are complex.
+                
+        """
         assert what in [ "x", "g", "V" ], "Invalid sample specification"
 
         if time is None and freq is not None:
@@ -202,7 +320,13 @@ class Sampler:
         return samples
             
     def select_values_by_time_freq(self, values, time=None, freq=None):
-
+        """
+        Select x, V, or g samples for a particular time/freq in the sim.
+        
+        Like the previous function but a specific sample array is passed in.
+        This should be merged with select_samples_by_time_freq.
+        """
+ 
         if time is None and freq is not None:
             assert False, "Both a time and frequency must be specified"
             v = values[:, freq:freq+1, :]
@@ -217,6 +341,25 @@ class Sampler:
         return v
             
     def remove_unsampled_x(self, x):
+        """
+        Remove the imaginary value of one x value in each time/freq of all the samples (not sampled due to phase degeneracy).
+        
+        Parameters
+        ----------
+        x: 4-D array
+            Sampled x values.
+            The first index into the array is the sample iteration number (ex. burn-in)
+            Each element of the array is a 3-D array of x values where the first
+            two indexes in that array are time and frequency, and the third index is antenna. 
+            The values are complex.
+             
+        Returns
+        -------
+        2-D array
+            Each element of the input 4-D array (an element is a 3-D "x" sample) is flattened. The
+            imaginary value of the x sample for the last antenna in each time/freq is removed.
+        """
+            
         samples_x = split_re_im(x)    
         samples_x = np.delete(samples_x, samples_x.shape[3]-1, axis=3)     # Remove unsampled x
         samples_x = samples_x.reshape(samples_x.shape[0], -1)
@@ -224,12 +367,34 @@ class Sampler:
         return samples_x
             
     def reform_x_from_samples(self, sampled_x, shape):
+        """
+        Add a 0 imaginary value to the x value for the last antenna in each time/freq.
+        
+        The opposite of remove_unsampled_x.
+        
+        Parameters
+        ----------
+         x : 2-D array
+            Each element of the array is a 3-D array that has been flattened. The 3-D array contains
+            samples of x for all time/freq. The values are not complex because they have been split into
+            their real/imag parts.
+            
+        Returns
+        -------
+        4-D array
+            The first index into the array is the sample iteration number (ex. burn-in)
+            Each element if thearray is a 3-D array of x values where the first
+            two indexes in that array are time and frequency, and the third index is antenna. 
+            The values are complex.
+        """
+             
         x = sampled_x.reshape(shape[0], shape[1], shape[2]*2-1)
         x = restore_x_im(x)
         return unsplit_re_im(x)
 
     
     def plot_marginals(self, parameter, cols, time=None, freq=None, which=[ "True", "Redcal", "Sampled" ]):
+        assert time is not None and freq is not None, "Time and freq must be specified"
         def plot_hist(a, fname, label, sigma_prior, other_vals, index):
             hist, bin_edges = np.histogram(a, bins=len(a)//50)
             bins = (bin_edges[1:]+bin_edges[:-1])/2
@@ -322,7 +487,8 @@ class Sampler:
         
         
     def plot_corner(self, parameters, time=None, freq=None, threshold=0.0, xgs=None, Vs=None):
-        assert parameters == ["x", "V"] or parameters == ["g", "v"], "corner plot needs x,V or g,V"
+        assert time is not None and freq is not None, "Time and freq must be specified"
+        assert parameters == ["x", "V"] or parameters == ["g", "V"], "corner plot needs x,V or g,V"
         assert threshold >= 0
         assert (threshold == 0.0 and xgs is None and Vs is None) or \
                 (threshold > 0.0 and xgs is None and Vs is None) or \
@@ -416,6 +582,7 @@ class Sampler:
         #return figure
         
     def plot_trace(self, parameter, time=None, freq=None, index=None):
+        assert time is not None and freq is not None, "Time and freq must be specified"
         assert isinstance(parameter, str), "trace parameter must be string"
         assert parameter in [ "x", "g", "V" ], "Unknown parameter: "+parameter
         
@@ -438,9 +605,29 @@ class Sampler:
         plt.xlabel("Sample iteration")
         plt.ylabel(parameter)
         plt.title("Traces for "+parameter)
+        
+    def print_sample_stats(self, parameter, time=None, freq=None):
+        assert parameter in [ "x", "g", "V" ], "print_sample_stats needs x or g or V"
+        
+        print("Stats for", parameter, "samples\n")
+        
+        re_im = lambda index: "re" if index%2 == 0 else "im"
+        
+        samples = split_re_im(self.select_samples_by_time_freq(parameter, time, freq))
+        
+        print("  Time  Freq   Parameter      Mean       Variance       Sigma")
+        for t in range(samples.shape[1]):
+            for f in range(samples.shape[2]):
+                for i in range(samples.shape[3]):
+                    print("{:5d}".format(t), "{:5d}".format(f),  "  ", "{:8}".format(re_im(i)+"("+parameter+"_"+str(i%2)+")"),  
+                          "{:12f}".format(np.mean(samples[:, t, f, i])), 
+                           "{:12f}".format(np.var(samples[:, t, f, i])),  "{:12f}".format(np.std(samples[:, t, f, i])))
+        
+        
                  
     def print_covcorr(self, parameters, time=None, freq=None, stat="corr", threshold=0.0, list_them=False, count_them=False):
-        assert len(parameters) == 2, "covariance needs x,V or g,V"
+        assert time is not None and freq is not None, "Time and freq must be specified"
+        assert parameters == ["x", "V"] or parameters == ["g", "V"], "print_covcorr needs x,V or g,V"
         assert stat == "cov" or stat == "corr", "Specify cov or corr for matrix"
         assert threshold >= 0
         
@@ -456,6 +643,7 @@ class Sampler:
             print(np.sum(np.where(abs(m) > threshold, 1, 0)))
             return
 
+        
         name = "x" if "x" in parameters else "g"
         labels = [ part(i)+"("+name+"_"+str(i//2)+")" for i in range(data_packet["x_or_g_len"]) ]+  \
                     [ part(i)+"(V_"+str(i//2)+")" for i in range(data_packet["V_len"]) ]
@@ -477,7 +665,8 @@ class Sampler:
             if not list_them: print()
             
     def plot_covcorr(self, parameters, time=None, freq=None, stat="corr", threshold=0.0):
-        assert len(parameters) == 2, "covariance needs x,V or g,V"
+        assert time is not None and freq is not None, "Time and freq must be specified"
+        assert parameters == ["x", "V"] or parameters == ["g", "V"], "plot_covcorr needs x,V or g,V"
         assert stat == "cov" or stat == "corr", "Specify cov or corr for matrix"
         assert threshold >= 0
         
@@ -485,11 +674,13 @@ class Sampler:
         
         if stat == "corr":
             print("Plotting correlation matrix")
+            vmin = -1
+            vmax = 1
         else:
             print("Plotting covariance matrix")
+            vmin = vmax = None
             
         param_tag = "x" if "x" in parameters else "g"
-
 
         data_packet = self.assemble_data(parameters, time, freq)
         print(param_tag+" values:", str(data_packet["x_or_g_len"])+",", "V values:", data_packet["V_len"])
@@ -497,13 +688,16 @@ class Sampler:
         m = np.cov(data_packet["data"], rowvar=False) if stat == "cov" else np.corrcoef(data_packet["data"], rowvar=False) 
         print("Matrix size", m.shape)
 
+        # Apply threshold
         np.fill_diagonal(m, 0)
         m[np.triu_indices(m.shape[0])] = 0
-        if threshold > 0.0: m[np.logical_and(m>-threshold,m<threshold)] = 0
+        if threshold > 0.0: 
+            m[np.logical_and(m>-threshold,m<threshold)] = 0
+            
 
         plt.figure()
         ax = plt.gca()
-        im = ax.matshow(m, cmap="RdBu")
+        im = ax.matshow(m, cmap="RdBu", vmin=vmin, vmax=vmax)
         nx = data_packet["x_or_g_len"]
         nv =  data_packet["V_len"]
         x=plt.xticks([nx//2, nx+nv//2], [param_tag, "V"], fontsize=15)
@@ -519,6 +713,7 @@ class Sampler:
             plt.title("Correlation matrix "+str(parameters))
             
     def plot_sample_means(self, parameters, time=None, freq=None):
+        assert time is not None and freq is not None, "Time and freq must be specified"
         assert len(parameters) <= 3, "Too many parameters requested"
         for p in parameters:
             assert p in [ "x", "g", "V" ], "Invalid parameter: "+p
@@ -540,7 +735,7 @@ class Sampler:
         
 
     def plot_results(self, time=None, freq=None): 
-        
+        assert time is not None and freq is not None, "Time and freq must be specified"
         print("Plot results")
         
         v_true = self.select_values_by_time_freq(self.vis_true.V_model, time, freq)
@@ -579,6 +774,7 @@ class Sampler:
         plt.tight_layout()
         
     def plot_gains(self, time=None, freq=None, sigma=3):
+        assert time is not None and freq is not None, "Time and freq must be specified"
         def normalize_phases(phases):
             # Make sure phases are between -pi, pi
             phases = np.where(phases>3*np.pi/2, phases-2*np.pi, phases)
@@ -685,6 +881,7 @@ class Sampler:
         else:
             samples = split_re_im(samples) 
             
+        data_packet["x_or_g_orig_shape"]= samples.shape
         data_packet["data"] = samples.reshape((samples.shape[0], -1))
         data_packet["x_or_g_len"] = data_packet["data"].shape[1]
              
@@ -795,7 +992,9 @@ class Sampler:
         
         V_mean = split_re_im(np.ravel(self.V_mean))
         d = split_re_im(np.ravel(v.V_obs))
-                                
+        
+        
+        np.dot(np.linalg.inv(Cv), V_mean)
         return self.random_draw(np.dot(A.T, np.dot(np.linalg.inv(N), d))+np.dot(np.linalg.inv(Cv), V_mean), A, Cv, N)
 
 
@@ -1125,18 +1324,20 @@ class Sampler:
 if __name__ == "__main__":
     from resource import getrusage, RUSAGE_SELF
 
-    sampler = Sampler(seed=99, niter=1000, burn_in=10, best_type="mean", random_the_long_way=False)
-    sampler.load_sim(4, ntime=1, nfreq=1, x_sigma=0)
-    print("Likelihood before run", sampler.vis_true.get_unnormalized_likelihood(unity_N=True))   
+    sampler = Sampler(seed=99, niter=1000, burn_in=10, best_type="mean", random_the_long_way=False, use_conj_grad=False)
+    sampler.load_sim(4, ntime=1, nfreq=1, x_sigma=0.1, obs_variance=10+10j, add_noise=False)
+    
+    print("Likelihood before run", sampler.vis_true.get_unnormalized_likelihood())   
     S = np.eye(sampler.nant()*2-1)*0.01
     V_mean = sampler.vis_redcal.V_model
     Cv = np.eye(V_mean.shape[2]*2)
     sampler.set_S_and_V_prior(S, V_mean, Cv)
 
-    
+
     sampler.run()
-    print("Likelihood after run", sampler.vis_sampled.get_unnormalized_likelihood(unity_N=True))   
     
+
+    print("Likelihood after run separated into time/freq", sampler.vis_sampled.get_unnormalized_likelihood())   
     usage = getrusage(RUSAGE_SELF)
     print("SIM", usage.ru_maxrss/1000.0/1000)      # Usage in GB
     
