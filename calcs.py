@@ -1,5 +1,9 @@
 import numpy as np
 
+def is_diagonal(a):
+    nz = np.count_nonzero(a - np.diag(np.diagonal(a)))
+    return nz == 0
+
 # Calculate a visibility Vij value
 
 def exact_calc(g_bar_i, g_bar_j, V_model_ij, x_i, x_j):

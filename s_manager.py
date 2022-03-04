@@ -1,6 +1,6 @@
 import numpy as np
 from fourier_ops import FourierOps
-from gls import split_re_im, unsplit_re_im
+from calcs import split_re_im, unsplit_re_im
 
 
 class SManager:
@@ -10,26 +10,54 @@ class SManager:
         self.nant = nant
         self.S = None
         self.fops = FourierOps(ntime, nfreq, nant)
+
         
-    def generate_S(self, func, view=False):
+    def generate_S(self, func, modes=None, ignore_threshold=0.01, zoom_from=None, view=False):
+        
+        def select(a):
+            good_locations = np.where(a>np.max(a)*ignore_threshold)
+            print(good_locations[0].size, "modes selected out of", a.size, "("+str(round(good_locations[0].size/a.size, 2)*100)+"%)")
+            b = np.zeros_like(a)
+            b[good_locations] = a[good_locations]
+            return np.array([b, good_locations])
+            
         x = np.arange(-1, 1, 2.0/self.ntime)
         y = np.arange(-1, 1, 2.0/self.nfreq)
+        
+        if zoom_from is not None:
+            x *= x.size/zoom_from[0]
+            y *= y.size/zoom_from[1]
         
         assert x.size == self.ntime and y.size == self.nfreq
         
         data = np.zeros((x.size, y.size))
-        for i in range(x.size):
-            for j in range(y.size):
+        center_x = data.shape[0]//2
+        center_y = data.shape[1]//2
+        if modes is None:
+            i_start = j_start = 0
+            i_end = j_end = x.size
+        else:
+            i_start = center_x-modes
+            j_start = center_y-modes
+            i_end = center_x+modes+1
+            j_end = center_y+modes+1
+            
+        for i in range(i_start, i_end, 1):
+            for j in range(j_start, j_end, 1):
                 data[i][j] = func(x[i], y[j])
-          
-        
+                
+        assert np.min(data) >= 0, "S cannot contain negative values"
+       
+        data[center_x, :] = data[:, center_y] = 0      # DC
         fft = np.fft.fftshift(data+data*1j)
-        fft[0, 0] = 0            # DC
+
 
         S = np.tile(np.ravel(split_re_im(fft)), self.nant-1)      
-        self.S = np.append(S, self.fops.condense_real_fft(fft)/np.sqrt(2))  # sqrt(2) factor explained in test_fourier.py
+        S = np.append(S, self.fops.condense_real_fft(fft)/np.sqrt(2))  # sqrt(2) factor explained in test_fourier.py
 
-        assert self.S.size == (self.nant-1)*(self.ntime*self.nfreq*2)+self.ntime*self.nfreq
+        assert S.size == (self.nant-1)*(self.ntime*self.nfreq*2)+self.ntime*self.nfreq
+        
+        self.S = select(S)        # usable modes, S is now 2-D array, data and usable modes
         
         if view:
             fops = FourierOps(self.ntime, self.nfreq, self.nant)
@@ -43,9 +71,9 @@ class SManager:
         # Use the S but generate +/-ve values around 0
         signs = np.random.normal(size=self.ntime*self.nfreq*2)
         signs = np.where(signs>0, 1, -1)
-        sigma_data = np.std(self.S[:self.ntime*self.nfreq*2]*signs)
+        sigma_data = np.std(self.S[0][:self.ntime*self.nfreq*2]*signs)
                     
-        ifft = unsplit_re_im(self.S[:self.ntime*self.nfreq*2]*signs)          # lines reshape to complex array for 1 ant (self.ntime, self.nfreq)
+        ifft = unsplit_re_im(self.S[0][:self.ntime*self.nfreq*2]*signs)          # lines reshape to complex array for 1 ant (self.ntime, self.nfreq)
         ifft = np.reshape(ifft, (self.ntime, self.nfreq))    
         ifft = self.fops.ifft2_normed(ifft)  
         
@@ -60,18 +88,17 @@ class SManager:
         
         
         if last_ant:
-            mean = np.zeros(self.ntime*self.nfreq)
-            ant_fft = self.S[-self.ntime*self.nfreq:]
+           ant_fft = self.S[0][-self.ntime*self.nfreq:]
         else:
-            mean = np.zeros(self.ntime*self.nfreq*2)
-            ant_fft = self.S[:self.ntime*self.nfreq*2]
+           ant_fft = self.S[0][:self.ntime*self.nfreq*2]
             
         if exact:
             random_signs = np.random.normal(size=ant_fft.size)
             random_signs = np.where(random_signs>0, 1, -1)
             samples = ant_fft*random_signs
         else:
-            samples = np.random.multivariate_normal(mean, np.diag(ant_fft))
+            # Assumes all modes are independent
+            samples = np.array([ np.random.normal(scale=var) if var>0 else 0 for var in ant_fft ])
             
         if what == "x":                        # do an inverse FFT
             if last_ant:
@@ -94,13 +121,14 @@ if __name__ == "__main__":
     
     dc = lambda x, y: 1 if x==0 and y == 0 else 0
     flat = lambda x, y: 1
-    gauss = lambda x, y: np.exp(-0.5*(x**2+y**2)/.05)
-    S, data, _ = sm.generate_S(flat, view=True)
+    gauss = lambda x, y: np.exp(-0.5*(x**2+y**2)/.01)
+    S, data, _ = sm.generate_S(gauss, view=True)
     
-   
+    plt.matshow(data)
+    plt.savefig("x"); exit()
 
 
-    x = sm.sample("x", exact=True)
+    x = sm.sample("x", exact=False)
     x = np.reshape(unsplit_re_im(x), (16, 16))
     print(np.std(x))
     plt.plot(x.real[10])      # time 0

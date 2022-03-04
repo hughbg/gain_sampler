@@ -2,7 +2,7 @@ import matplotlib.pyplot as plt
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 from vis_creator import VisSim, VisCal, VisTrue
 from gls import gls_solve, generate_proj
-from calcs import split_re_im, unsplit_re_im, BlockMatrix, remove_x_im, restore_x_im
+from calcs import split_re_im, unsplit_re_im, BlockMatrix, remove_x_im, restore_x_im, is_diagonal
 from fourier_ops import FourierOps
 import hera_cal as hc
 import corner
@@ -111,10 +111,22 @@ class Sampler:
 
         self.file_root = ""
             
-    def set_S_and_V_prior(self, S_diag, V_mean, Cv_diag):
-        self.S = S_diag
+    def set_S_and_V_prior(self, S, V_mean, Cv):
+        N_diag = np.zeros(0)
+        for time in range(self.vis_redcal.ntime):
+            for freq in range(self.vis_redcal.nfreq):
+                N_diag = np.append(N_diag, split_re_im(self.vis_redcal.obs_variance[time][freq]))
+
+        Cv_diag = np.zeros(0)
+        for time in range(self.vis_redcal.ntime):
+            for freq in range(self.vis_redcal.nfreq):
+                Cv_diag = np.append(Cv_diag, Cv)
+
+
+        self.S_diag = S
         self.V_mean = V_mean
-        self.Cv = Cv_diag
+        self.Cv_diag = Cv_diag
+        self.N_diag = N_diag
         
     def nant(self):
         return self.vis_redcal.nant
@@ -126,7 +138,6 @@ class Sampler:
     def run(self):
         if not hasattr(self,"vis_true"):
             raise RuntimeError("No sim loaded. Can't sample.")
-        print(time.time())
             
         print("Running sampling")
         sampled_x = np.zeros((self.niter, self.vis_redcal.ntime, self.vis_redcal.nfreq, self.vis_redcal.nant),
@@ -164,7 +175,7 @@ class Sampler:
             
             new_x = self.reform_x_from_samples(sample, self.vis_redcal.x.shape) 
             sampled_x[i] = new_x
-            print(time.time()); exit()
+
             
         sampled_x = sampled_x[(self.niter*self.burn_in)//100:]
         sampled_V = sampled_V[(self.niter*self.burn_in)//100:]
@@ -729,7 +740,13 @@ class Sampler:
         self.sampled_x = sampled_x
         self.sampled_V = sampled_V
 
-    def r_draw(self, d, A, S, N, fops):
+    def r_draw(self, d, A, S_diag, N_diag, fops):
+        
+        def place_usable_modes(vals):
+            xx = np.zeros_like(S_values)
+            xx[usable_modes] = vals
+            return xx
+            
         """
         does the dynamic range fixup.
         print(v.nvis, v.nant, v.ntime, v.nfreq, S.shape, N.shape, d.shape, A.shape)
@@ -744,67 +761,80 @@ class Sampler:
        
         # [1 + sqrt(S)(A.T N-1 A)sqrt(S)]x = sqrt(S) A.TN-1 A d + random + sqrt(S)A.T sqrt(N_inv) random
 
-        sqrt_S = self.sqrtm(S)
-        
-        
-        # Work on the RHS
+        usable_modes = S_diag[1][0]
+        S_values = S_diag[0]
+        sqrt_S = np.sqrt(S_values)
 
-        sqrt_S_AFT_Ninv_d = np.dot(sqrt_S, fops.AFT_Ninv_v(A, N, d))      
-        sqrt_S_AFT_sqrt_Ninv_omega = np.dot(sqrt_S, fops.AFT_Ninv_v(A, N, self.standard_random_draw(d.size), sqrt_N=True))  
-        rhs = sqrt_S_AFT_Ninv_d+self.standard_random_draw(S.shape[0])+sqrt_S_AFT_sqrt_Ninv_omega
+        N_diag_inv = 1/N_diag
         
+        # Work on RHS
+
+        sqrt_S_AFT_Ninv_d = (sqrt_S*fops.F_v(np.dot(A.T, N_diag_inv*d)))[usable_modes]
+        sqrt_S_AFT_sqrt_Ninv_omega = (sqrt_S*fops.F_v(np.dot(A.T, np.sqrt(N_diag_inv)*self.standard_random_draw(d.size))))[usable_modes]
+        rhs = sqrt_S_AFT_Ninv_d+self.standard_random_draw(usable_modes.size)+sqrt_S_AFT_sqrt_Ninv_omega
+
         # Work on the LHS
         
-        square_bracket_term = fops.AFT_Ninv_v(A, N, fops.AF_v(A, np.sqrt(np.diag(S))))        # AF.T N_inv (AF sqrt(S))
-        square_bracket_term = np.dot(sqrt_S, square_bracket_term)                   # sqrt_S AF.T N_inv AF sqrt(S)
-        square_bracket_term = np.diag(np.full(S.shape[0], 1) + square_bracket_term)
- 
-        x_proxy, _ = scipy.sparse.linalg.cg(square_bracket_term, rhs)             # Conjugate gradient
+        def matvec(x):
+            # Put the x values in the usable mode places. Select them out after we are done
+            return x+(sqrt_S*fops.F_v(np.dot(A.T, N_diag_inv*np.dot(A, fops.F_inv_fft(sqrt_S*place_usable_modes(x))))))[usable_modes]
+                 
+        def operator():                            
+            shape = (usable_modes.size, usable_modes.size)
         
-        s = np.dot(sqrt_S, x_proxy)
+            return scipy.sparse.linalg.LinearOperator(shape, matvec=matvec, dtype=np.float)
         
-        x = fops.AF_v(np.eye(A.shape[1]), s)       # Just converts s to x
+        # works (sometimes) if create rhs from the matrix and random vec
+        # or if S_diag = 1
+        # try: condense out the zeros
+        # Priors can't be <= 0 but x values will be after FFT.  Convert S prior to x prior or make all x absoulte (>0)
+        # but there is the inverse fft
+
+        
+        op = operator()
+        x_proxy, info = scipy.sparse.linalg.cg(op, rhs)             # Conjugate gradient for stability
+        assert info == 0, str(info)
+        
+        s = sqrt_S*place_usable_modes(x_proxy)
+        
+        x = fops.F_inv_fft(s)       # Just converts s to x
+        
 
         return x
+
                            
-    def random_draw(self, first_term, A, S, N):
-        N_inv = np.linalg.inv(N)
-        S_inv = np.linalg.inv(S) 
-        S_sqrt = self.sqrtm(S)
-        A_N_A = np.dot(A.T, np.dot(N_inv, A))
-        
-        
-        rhs = np.dot(S_sqrt, first_term)
-        rhs += np.dot(S_sqrt, np.dot(A.T, np.dot(self.sqrtm(N_inv), self.standard_random_draw(A.shape[0]))))
+    def random_draw(self, first_term, A, S_diag, N_diag):
+        N_diag_inv = 1/N_diag
+        S_diag_inv = 1/S_diag
+        S_sqrt = np.sqrt(S_diag)
+        A_N_A = np.dot(A.T*N_diag_inv, A).T       # If N is a vector
+
+
+        rhs = np.multiply(S_sqrt, first_term)
         rhs += self.standard_random_draw(A.shape[1])
-        
-        bracket_term = np.eye(S.shape[0])
-        bracket_term += np.dot(S_sqrt, np.dot(A_N_A, S_sqrt))
-        
+        rhs += np.multiply(S_sqrt, np.dot(A.T, np.multiply(np.sqrt(N_diag_inv), self.standard_random_draw(A.shape[0]))))
+
+        bracket_term = np.eye(S_diag.size)
+        bracket_term += (A_N_A.T*S_sqrt).T*S_sqrt
+
         if self.use_conj_grad:
             x, info = scipy.sparse.linalg.cg(bracket_term, rhs)
             assert info == 0
         else: x = np.dot(np.linalg.inv(bracket_term), rhs)
-        
-        return np.dot(S_sqrt, x)
+
+        x = np.multiply(S_sqrt, x)
+
+        return x
+
 
     
     def x_random_draw(self, v):
         A = generate_proj(v.g_bar, v.project_model())  # depends on model
         
-        bm = BlockMatrix()
-        for time in range(v.ntime):
-            for freq in range(v.nfreq):
-                bm.add((split_re_im(v.obs_variance[time][freq])))
-        N = bm.assemble()
-        
-        d = split_re_im(np.ravel(v.get_reduced_observed()))                     
-        #d = split_re_im(v.get_reduced_observed1()) 
-        
+        d = split_re_im(np.ravel(v.get_reduced_observed()))                             
         
         fops = FourierOps(v.ntime, v.nfreq, v.nant)
-        return self.r_draw(d, A, np.diag(self.S), N, fops)
-        
+        return self.r_draw(d, A, self.S_diag, self.N_diag, fops)
         
         return self.random_draw(np.dot(A.T, np.dot(np.linalg.inv(N), d)), A, S, N)
         
@@ -815,23 +845,20 @@ class Sampler:
         bm.add(v.model_projection, replicate=v.ntime*v.nfreq)
         redundant_projector = bm.assemble()   # Non square matrix of shape nvis*2*ntime*nfreq x nredundant_vis*2*nreq*ntime
         A = np.dot(A, redundant_projector)    # Non square matrix of shape nvis*2*ntime*nfreq x nredundant_vis*2*nreq*ntime
-    
-        bm = BlockMatrix()
-        for time in range(v.ntime):
-            for freq in range(v.nfreq):
-                bm.add((split_re_im(v.obs_variance[time][freq])))
-        N = bm.assemble()
-        
-        bm = BlockMatrix()
-        for time in range(v.ntime):
-            for freq in range(v.nfreq):
-                bm.add(self.Cv)
-        Cv = bm.assemble()
-        
+
+
         V_mean = split_re_im(np.ravel(self.V_mean))
         d = split_re_im(np.ravel(v.V_obs))
-                                
-        return self.random_draw(np.dot(A.T, np.dot(np.linalg.inv(N), d))+np.dot(np.linalg.inv(Cv), V_mean), A, Cv, N)
+
+        print("V ---------")
+        print("d", np.mean(d), np.std(d))
+        print("A", np.mean(A), np.std(A))
+        print("Cv", np.mean(self.Cv_diag), np.std(self.Cv_diag))
+        print("N_diag", np.mean(self.N_diag), np.std(self.N_diag))
+
+        return self.random_draw(np.dot(A.T, np.multiply(1/self.N_diag, d))+np.multiply(1/self.Cv_diag, V_mean), A, self.Cv_diag, self.N_diag)
+
+
 
 
     def new_x_distribution(self, v):
@@ -853,7 +880,7 @@ class Sampler:
         bm = BlockMatrix()
         for time in range(v.ntime):
             for freq in range(v.nfreq):
-                bm.add((self.S))
+                bm.add((self.S_diag))
         S = bm.assemble()
         
 
@@ -921,7 +948,7 @@ class Sampler:
         bm = BlockMatrix()
         for time in range(v.ntime):
             for freq in range(v.nfreq):
-                bm.add(self.Cv)
+                bm.add(self.Cv_diag)
         Cv = bm.assemble()
         
         
@@ -1161,22 +1188,44 @@ if __name__ == "__main__":
     from resource import getrusage, RUSAGE_SELF
     from s_manager import SManager
     import matplotlib.pyplot as plt
+    import hickle, os
 
-    sampler = Sampler(seed=99, niter=10, burn_in=10, best_type="mean", random_the_long_way=True)
+    sampler = Sampler(niter=10, burn_in=10, best_type="mean", random_the_long_way=True, use_conj_grad=True)
     sampler.load_sim(4, ntime=16, nfreq=16, x_sigma=0)
-    print("Likelihood before run", sampler.vis_true.get_unnormalized_likelihood(unity_N=True))   
-    gauss = lambda x, y: np.exp(-0.5*(x**2+y**2)/.05)
-    dc = lambda x, y: 1 if x==0 and y == 0 else 0
-    sm = SManager(16, 16, 4)
-    S = sm.generate_S(gauss);
-    V_mean = sampler.vis_redcal.V_model
-    Cv = np.eye(V_mean.shape[2]*2)
-    sampler.set_S_and_V_prior(S, V_mean, Cv)
 
-    #sampler.run()
+    # Fourier mode setup for S
+    dc = lambda x, y: 1 if x==0 and y == 0 else 0
+    gauss = lambda x, y: np.exp(-0.5*(x**2+y**2)/.005)
+    random = lambda x, y: np.random.random(size=1)
+    sm = SManager(16, 16, 4)
+    S_diag = sm.generate_S(gauss)   # Contains all times/freqs
+
+
+    # V prior
+    V_mean = sampler.vis_redcal.V_model
+    Cv_diag = np.full(V_mean.shape[2]*2, 2)
+
+    sampler.set_S_and_V_prior(S_diag, V_mean, Cv_diag)
+    
+    
+    """
+    start = time.time()
+    sampler.run()
+
+    print("Run time:", time.time()-start)
+    
+    hickle.dump(sampler, 'sampler_'+str(os.getpid())+'.hkl', mode='w', compression='gzip')
+    
+
+    exit()
+    """
+ 
     x = sampler.x_random_draw(sampler.vis_redcal)
-    x = np.reshape(unsplit_re_im(x[:512]), (16, 16))
-    plt.plot(x[7].imag)
+    x = sampler.reform_x_from_samples(x, sampler.vis_redcal.x.shape) 
+    x = np.moveaxis(x, 2, 0)
+
+    plt.clf()
+    plt.plot(x[0, :, 4].real)
     plt.savefig("x")
     
     usage = getrusage(RUSAGE_SELF)

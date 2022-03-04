@@ -44,20 +44,68 @@ class FourierOps:
         assert unique.size == N**2
 
         return unique
+    
+    def F_v(self, v):
+        # v is a vector of x values split into re/im and flattened by time/freq
+        
+        result = np.reshape(v, (self.ntime, self.nfreq, self.nant*2-1))    # Reshape so can add missing x
+        result = restore_x_im(result)              # Add the missing x value for each time/freq. (Is missing for DOF fix). It is 0.
+        result = unsplit_re_im(result)             # 2 lines reform to complex N-D arrayfor a Fourier transform 
+        result = np.moveaxis(result, 2, 0)         # Make the axes (self.nant, self.ntime, self.nfreq) i.e. ant first. The array for the last ant has only real values.
+        result = self.fft2_normed(result)                  
+        condensed = self.condense_real_fft(result[-1])       # The last antenna FFT which is of real values needs to be stripped to unique values
+        result = np.append(split_re_im(np.ravel(result[:-1])), condensed)                # flatten and split, now length is (self.nant-1)*self.ntime*self.nfreq*2+1*self.ntime*self.nfreq
+        assert result.size == (self.nant-1)*self.ntime*self.nfreq*2+self.ntime*self.nfreq
+
+        return result                           # This is a vector of FFT(x) with no values missing
+
+    def F_M(self, M):
+        # The columns of M are x-like, x values split into re/im and flattened by time/freq
+        
+        result = np.empty(M.shape)
+        for j in range(M.shape[1]):
+            result[:, j] = self.F_v(M[:, j])
+        
+        return result        # Each column of the result is now the FFT of each column of M                   
+    
+    def F_inv_fft(self, fft):
+        
+        expanded = self.expand_real_fft(fft[-self.ntime*self.nfreq:])     # Generate the full FFT of the last antenna
+
+        result = unsplit_re_im(fft[:-self.ntime*self.nfreq])                       # 3 lines reshape to complex array (self.nant-1, self.ntime, self.nfreq)
+        result = np.reshape(result, (self.nant-1, self.ntime, self.nfreq))    
+        result = np.append(result, [expanded], axis=0)                     # Tack on last antenna
+        result = self.ifft2_normed(result)    
+        assert np.sum(result[3].imag) == 0           # All the imag should be 0
+        result = np.moveaxis(result, 0, 2)           # Make the axes (self.ntime, self.nfreq, self.nant)
+        result = remove_x_im(split_re_im(result))    # Remove one imaginary x value in each time/freq   
+        result = np.ravel(result)                    # Flatten, now length is self.ntime*self.nfreq*(self.nant*2-1)
+        return result
+
+    def F_inv_M_fft(self, fft):
+        
+        # The columns of M are x-like, x values split into re/im and flattened by time/freq
+        
+        result = np.empty(fft.shape)
+        for j in range(fft.shape[1]):
+            result[:, j] = self.F_inv_fft(fft[:, j])
+        
+        return result        # Each column of the result is now the FFT of each column of M                   
 
     def AFT_Ninv_v(self, A, N, v, sqrt_N=False):          
         """ 
-        AF.T Ninv multiplied by some vector. The vector has to be d-like and returns FFT of x-like.
+        AF.T Ninv multiplied by some vector. N is a vector. The vector v has to be d-like and returns FFT of x-like as vector. 
 
         AF is an inverse FFT followed by the old A. AF.T is the old A.T followed by an FFT, (in procedural terms).
         It's too tricky at this stage to generate AF.T N_inv itself, which could be multiplied into a 
         vector later.
         """
+                                      
 
         if sqrt_N:
-            result = np.dot(A.T, v/np.sqrt(np.diag(N)) )         # will give a vector of split values (self.ntime, self.nfreq, self.nant*2-1)
+            result = print(A*(v/N))                # when using the diagonal of an array, must use * in the right way
         else:
-            result = np.dot(A.T, v/np.diag(N))  
+            result = print(A*(v/np.sqrt(N))) 
         result = np.reshape(result, (self.ntime, self.nfreq, self.nant*2-1))    # Reshape so can add missing x
         result = restore_x_im(result)              # Add the missing x value for each time/freq. (Is missing for DOF fix). It is 0.
         result = unsplit_re_im(result)             # 2 lines reform to complex N-D arrayfor a Fourier transform 
@@ -75,7 +123,7 @@ class FourierOps:
 
     def expand_real_fft(self, components):
         N = int(np.sqrt(components.size))
-        assert N**2 == components.size
+        assert N**2 == components.size, "components is not square: "+str(components.shape)
 
         # Insert 4 zero values 
         where = [ 1, N, components.size-N+1, components.size]
