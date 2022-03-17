@@ -6,7 +6,7 @@ from calcs import split_re_im, unsplit_re_im, BlockMatrix, remove_x_im, restore_
 import hera_cal as hc
 import corner
 import copy
-import numpy as np
+import numpy as np, sys
 import scipy.linalg, scipy.sparse
 import pickle
 
@@ -184,10 +184,26 @@ class Sampler:
             Must be a square array of dimension equal to the number of baselines times 2.
         """
             
-
-        self.S = S
+        N_diag = np.zeros(0)
+        for time in range(self.vis_redcal.ntime):
+            for freq in range(self.vis_redcal.nfreq):
+                N_diag = np.append(N_diag, split_re_im(self.vis_redcal.obs_variance[time][freq]))
+               
+        Cv_diag = np.zeros(0)
+        for time in range(self.vis_redcal.ntime):
+            for freq in range(self.vis_redcal.nfreq):
+                Cv_diag = np.append(Cv_diag, Cv)
+                
+        S_diag = np.zeros(0)
+        for time in range(self.vis_redcal.ntime):
+            for freq in range(self.vis_redcal.nfreq):
+                S_diag = np.append(S_diag, S)
+        
+        
+        self.S_diag = S_diag
         self.V_mean = V_mean
-        self.Cv = Cv
+        self.Cv_diag = Cv_diag
+        self.N_diag = N_diag
         
     def nant(self):
         return self.vis_redcal.nant
@@ -259,9 +275,11 @@ class Sampler:
                 x_dist_mean, x_dist_covariance = self.new_x_distribution(v_x_sampling)
                 sample = np.random.multivariate_normal(x_dist_mean, x_dist_covariance, 1)  
             
+     
             new_x = self.reform_x_from_samples(sample, self.vis_redcal.x.shape) 
             sampled_x[i] = new_x
-            
+            sys.stdout.flush()
+
         sampled_x = sampled_x[(self.niter*self.burn_in)//100:]
         sampled_V = sampled_V[(self.niter*self.burn_in)//100:]
         sampled_gains = np.zeros_like(sampled_x)
@@ -927,50 +945,46 @@ class Sampler:
         self.sampled_x = sampled_x
         self.sampled_V = sampled_V
 
-                           
-    def random_draw(self, first_term, A, S, N):
-        N_inv = np.linalg.inv(N)
-        S_inv = np.linalg.inv(S) 
-        S_sqrt = self.sqrtm(S)
-        A_N_A = np.dot(A.T, np.dot(N_inv, A))
+
+    def random_draw(self, first_term, A, S_diag, N_diag):
+        N_diag_inv = 1/N_diag
+        S_diag_inv = 1/S_diag 
+        S_sqrt = np.sqrt(S_diag)
         
         
-        rhs = np.dot(S_sqrt, first_term)
-        rhs += np.dot(S_sqrt, np.dot(A.T, np.dot(self.sqrtm(N_inv), self.standard_random_draw(A.shape[0]))))
+        rhs = S_sqrt*first_term
+        rhs += S_sqrt*np.dot(A.T, np.sqrt(N_diag_inv)*self.standard_random_draw(A.shape[0]))
         rhs += self.standard_random_draw(A.shape[1])
-        
-        bracket_term = np.eye(S.shape[0])
-        bracket_term += np.dot(S_sqrt, np.dot(A_N_A, S_sqrt))
-        
+
+        bracket_term = np.eye(S_diag.size)
+        bracket_term += (np.dot((A*S_sqrt).T*N_diag_inv, A)*S_sqrt).T 
+
         if self.use_conj_grad:
             x, info = scipy.sparse.linalg.cg(bracket_term, rhs)
             assert info == 0
         else: x = np.dot(np.linalg.inv(bracket_term), rhs)
         
-        return np.dot(S_sqrt, x)
+        x = np.multiply(S_sqrt, x)
+
+        return x
 
     
     def x_random_draw(self, v):
         A = generate_proj(v.g_bar, v.project_model())  # depends on model
+                
+        d = split_re_im(np.ravel(v.get_reduced_observed())) 
         
-        bm = BlockMatrix()
-        for time in range(v.ntime):
-            for freq in range(v.nfreq):
-                bm.add((split_re_im(v.obs_variance[time][freq])))
-        N = bm.assemble()
+        #print("x ---------")
+        #print("d", np.mean(d), np.std(d))
+        #print("A", np.mean(A), np.std(A))
+        #print("S", np.mean(self.S_diag), np.std(self.S_diag))
+        #print("N", np.mean(self.N_diag), np.std(self.N_diag))
         
-        d = split_re_im(np.ravel(v.get_reduced_observed()))                     
-        #d = split_re_im(v.get_reduced_observed1()) 
-        
-        bm = BlockMatrix()
-        for time in range(v.ntime):
-            for freq in range(v.nfreq):
-                bm.add((self.S))
-        S = bm.assemble()
-        
-        return self.random_draw(np.dot(A.T, np.dot(np.linalg.inv(N), d)), A, S, N)
+
+        return self.random_draw(np.dot(A.T, np.multiply(1/self.N_diag, d)), A, self.S_diag, self.N_diag)
         
     
+
     def V_random_draw(self, v):
         A = self.generate_m_proj(v)   # Square matrix of shape nvis*2*ntime*nfreq
         bm = BlockMatrix()
@@ -978,24 +992,17 @@ class Sampler:
         redundant_projector = bm.assemble()   # Non square matrix of shape nvis*2*ntime*nfreq x nredundant_vis*2*nreq*ntime
         A = np.dot(A, redundant_projector)    # Non square matrix of shape nvis*2*ntime*nfreq x nredundant_vis*2*nreq*ntime
     
-        bm = BlockMatrix()
-        for time in range(v.ntime):
-            for freq in range(v.nfreq):
-                bm.add((split_re_im(v.obs_variance[time][freq])))
-        N = bm.assemble()
-        
-        bm = BlockMatrix()
-        for time in range(v.ntime):
-            for freq in range(v.nfreq):
-                bm.add(self.Cv)
-        Cv = bm.assemble()
-        
+
         V_mean = split_re_im(np.ravel(self.V_mean))
         d = split_re_im(np.ravel(v.V_obs))
         
-        
-        np.dot(np.linalg.inv(Cv), V_mean)
-        return self.random_draw(np.dot(A.T, np.dot(np.linalg.inv(N), d))+np.dot(np.linalg.inv(Cv), V_mean), A, Cv, N)
+        #print("V ---------")
+        #print("d", np.mean(d), np.std(d))
+        #print("A", np.mean(A), np.std(A))
+        #print("Cv", np.mean(self.Cv_diag), np.std(self.Cv_diag))
+        #print("N_diag", np.mean(self.N_diag), np.std(self.N_diag))
+
+        return self.random_draw(np.dot(A.T, np.multiply(1/self.N_diag, d))+np.multiply(1/self.Cv_diag, V_mean), A, self.Cv_diag, self.N_diag)
 
 
     def new_x_distribution(self, v):
@@ -1005,29 +1012,21 @@ class Sampler:
 
         A = generate_proj(v.g_bar, v.project_model())  # depends on model
         
-        bm = BlockMatrix()
-        for time in range(v.ntime):
-            for freq in range(v.nfreq):
-                bm.add((split_re_im(v.obs_variance[time][freq])))
-        N = bm.assemble()
-        
         d = split_re_im(np.ravel(v.get_reduced_observed()))                     
-        #d = split_re_im(v.get_reduced_observed1()) 
         
-        bm = BlockMatrix()
-        for time in range(v.ntime):
-            for freq in range(v.nfreq):
-                bm.add((self.S))
-        S = bm.assemble()
+        N_diag_inv = 1/self.N_diag
+        S_diag_inv = 1/self.S_diag
         
+        #print("V ---------")
+        #print("d", np.mean(d), np.std(d))
+        #print("A", np.mean(A), np.std(A))
+        #print("S", np.mean(self.S_diag), np.std(self.S_diag))
+        #print("N_diag", np.mean(self.N_diag), np.std(self.N_diag))
 
-        N_inv = np.linalg.inv(N)
-        S_inv = np.linalg.inv(S)
-
-        term1 = np.dot(A.T, np.dot(N_inv, A))
-        term2 = np.dot(A.T, np.dot(N_inv, d))
-        dist_mean = np.dot(np.linalg.inv(S_inv+term1), term2)
-        dist_covariance = np.linalg.inv(S_inv+term1)
+        term1 = np.dot(A.T*N_diag_inv, A).T       # If N is a vector
+        term2 = np.dot(A.T, np.multiply(N_diag_inv, d))
+        dist_mean = np.dot(np.linalg.inv(np.diag(S_diag_inv)+term1), term2)
+        dist_covariance = np.linalg.inv(np.diag(S_diag_inv)+term1)
 
         return dist_mean, dist_covariance
 
@@ -1062,7 +1061,7 @@ class Sampler:
 
         return bm.assemble()
 
-
+    
     def new_model_distribution(self, v):
         # The x values have been updated so get a new distribution.
         # If the x value has not been changed and C is set to None
@@ -1074,38 +1073,30 @@ class Sampler:
         bm.add(v.model_projection, replicate=v.ntime*v.nfreq)
         redundant_projector = bm.assemble()   # Non square matrix of shape nvis*2*ntime*nfreq x nredundant_vis*2*nreq*ntime
         A = np.dot(A, redundant_projector)    # Non square matrix of shape nvis*2*ntime*nfreq x nredundant_vis*2*nreq*ntime
-
-    
-        bm = BlockMatrix()
-        for time in range(v.ntime):
-            for freq in range(v.nfreq):
-                bm.add((split_re_im(v.obs_variance[time][freq])))
-        N = bm.assemble()
-        
-        bm = BlockMatrix()
-        for time in range(v.ntime):
-            for freq in range(v.nfreq):
-                bm.add(self.Cv)
-        Cv = bm.assemble()
-        
         
         V_mean = split_re_im(np.ravel(self.V_mean))
         d = split_re_im(np.ravel(v.V_obs))
 
-        N_inv = np.linalg.inv(N)
-        Cv_inv = np.linalg.inv(Cv)
+        N_diag_inv = 1/self.N_diag
+        Cv_diag_inv = 1/self.Cv_diag
         
-
         # Only want x values to go +/-10% 
         # Fiddle with the prior widths
         # Plot the distributions mathematically
         # Focus day in the office working on this
         # Equation 17
         # Add noise
+        
+        #print("V ---------")
+        #print("d", np.mean(d), np.std(d))
+        #print("A", np.mean(A), np.std(A))
+        #print("Cv", np.mean(self.Cv_diag), np.std(self.Cv_diag))
+        #print("N_diag", np.mean(self.N_diag), np.std(self.N_diag))
 
-        term1 = np.dot(A.T, np.dot(N_inv, A))
-        dist_covariance = np.linalg.inv(term1+Cv_inv)
-        term2 = np.dot(A.T, np.dot(N_inv, d))+np.dot(Cv_inv, V_mean)
+
+        term1 = np.dot(A.T*N_diag_inv, A).T       # If N is a vector
+        dist_covariance = np.linalg.inv(term1+np.diag(Cv_diag_inv))
+        term2 = np.dot(A.T, np.multiply(N_diag_inv, d))+np.multiply(Cv_diag_inv, V_mean)
         dist_mean = np.dot(dist_covariance, term2)
 
 
@@ -1130,6 +1121,7 @@ class Sampler:
         """
 
         return dist_mean, dist_covariance
+
     
     def bests(self, parameters=["x", "V"], method="mean"):
         def peak(a):
@@ -1323,63 +1315,24 @@ class Sampler:
 
 if __name__ == "__main__":
     from resource import getrusage, RUSAGE_SELF
+    import hickle, os
 
-    sampler = Sampler(seed=99, niter=1000, burn_in=10, best_type="mean", random_the_long_way=False, use_conj_grad=False)
-    sampler.load_sim(4, ntime=1, nfreq=1, x_sigma=0.1, obs_variance=10+10j, add_noise=False)
-    
-    print("Likelihood before run", sampler.vis_true.get_unnormalized_likelihood())   
-    S = np.eye(sampler.nant()*2-1)*0.01
+    sampler = Sampler(seed=99, niter=1000, burn_in=0, best_type="mean", random_the_long_way=True, use_conj_grad=True)
+    sampler.load_sim(4, ntime=1, nfreq=1, x_sigma=0.0)
+   
+    print("Likelihood before run", sampler.vis_true.get_unnormalized_likelihood(over_all=True))   
+    S_diag = np.full(sampler.nant()*2-1, 0.01)
     V_mean = sampler.vis_redcal.V_model
-    Cv = np.eye(V_mean.shape[2]*2)
-    sampler.set_S_and_V_prior(S, V_mean, Cv)
+    Cv_diag = np.full(V_mean.shape[2]*2, 2)
+    sampler.set_S_and_V_prior(S_diag, V_mean, Cv_diag)
 
 
     sampler.run()
     
 
-    print("Likelihood after run separated into time/freq", sampler.vis_sampled.get_unnormalized_likelihood())   
+    print("Likelihood after run separated into time/freq", sampler.vis_sampled.get_unnormalized_likelihood(over_all=True))   
     usage = getrusage(RUSAGE_SELF)
     print("SIM", usage.ru_maxrss/1000.0/1000)      # Usage in GB
     
-    exit()
+    hickle.dump(sampler, 'sampler_'+str(os.getpid())+'.hkl', mode='w', compression='gzip')
     
-    
-    cv_factor = 1
-    for i in range(10):
-        print("cv", cv_factor, "===================================================")
-        
-        s_factor = 1
-        
-        for j in range(10):
-            print("s", s_factor, "===================================================")
-            
-            sampler = Sampler(seed=99, niter=10000, burn_in=10, best_type="mean", random_the_long_way=False)
-            sampler.load_nr_sim("/scratch3/users/hgarsden/catall/calibration_points/viscatBC", 
-                            time_range=(0, 2), freq_range=(0, 2), remove_redundancy=False, initial_solve_for_x=False)  
-            print("Likelihood before run", sampler.vis_true.get_unnormalized_likelihood(over_all=True, unity_N=True))   
-
-            S = np.eye(sampler.nant()*2-1)*0.01*s_factor
-            V_mean = sampler.vis_redcal.V_model #*np.random.rand(sampler.vis_redcal.V_model.shape[0],
-                                                              #sampler.vis_redcal.V_model.shape[1],
-                                                              #sampler.vis_redcal.V_model.shape[2])
-            Cv = np.eye(V_mean.shape[2]*2)*cv_factor
-            sampler.set_S_and_V_prior(S, V_mean, Cv)
-
-            sampler.run()
-            print("Likelihood after run", sampler.vis_sampled.get_unnormalized_likelihood(over_all=True, unity_N=True))   
-            sampler.print_covcorr(["x", "V"], count_them=True, threshold=0.8)
-            
-            s_factor *= 1.3
-            
-            
-        cv_factor *= 1.3
-        
-    
-    
-    #sampler.plot_marginals("x", 5, time=0, freq=0); plt.clf()
-    #sampler.plot_trace("x", time=0, freq=0); plt.clf()
-    #sampler.plot_covcorr(["x", "V"],  time=0, freq=None); plt.clf()
-    #sampler.plot_sample_means(["x"],  time=0, freq=0); plt.clf()
-    #sampler.plot_results(time=0, freq=0); plt.clf()
-    #sampler.plot_gains(); plt.clf()
-    #sampler.plot_corner(["x", "V"], time=0, freq=0, threshold=0.8)

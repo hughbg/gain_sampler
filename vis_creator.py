@@ -292,8 +292,7 @@ class VisSim:
                 for freq in range(self.nfreq):
                     N_all.add(np.diag(split_re_im(self.obs_variance[time][freq])))
             N_all = N_all.assemble()
-
-            determinant = np.prod(np.diag(N_all))
+            determinant = None # np.prod(np.diag(N_all))       # overflows
             # N is diagonal so inverse is easy
             N_inv_all = np.diag(1/np.diag(N_all))
 
@@ -305,7 +304,7 @@ class VisSim:
                 for freq in range(self.nfreq):
                     dy_tf = split_re_im(dy[time, freq])
                     N = np.diag(split_re_im(self.obs_variance[time][freq]))
-                    determinant = np.prod(np.diag(N))
+                    determinant = None # np.prod(np.diag(N))   #overflows
                     N_inv = np.diag(1/np.diag(N))
                     likelihoods[time, freq] = likelihood(dy_tf, N_inv, determinant)
                     
