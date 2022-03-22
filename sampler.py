@@ -4,15 +4,36 @@ from vis_creator import VisSim, VisCal, VisTrue
 from gls import gls_solve, generate_proj
 from calcs import split_re_im, unsplit_re_im, BlockMatrix, remove_x_im, restore_x_im, is_diagonal
 from fourier_ops import FourierOps
+from resources import Resources
 import hera_cal as hc
 import corner
 import copy
 import numpy as np
 import scipy.linalg, scipy.sparse
-import pickle
-import time
+import sys
 
 
+        
+def load_from_files(files):
+    import hickle
+    assert len(files) > 0, "No files"
+    sampler = hickle.load(files[0])
+    for f in files[1:]:
+        s = hickle.load(f)
+        for param in [ "x", "g", "V" ]:
+            assert sampler.samples[param].shape[1:] == s.samples[param].shape[1:]
+            sampler.samples[param] = np.append(sampler.samples[param], s.samples[param], axis=0)
+        sampler.niter += s.niter
+        
+        
+    # Create an object containing the best fit
+    best_vals = sampler.bests(method=sampler.best_type)
+    sampler.vis_sampled.x = best_vals["x"]
+    sampler.vis_sampled.V_model = best_vals["V"]
+    
+    return sampler
+
+        
 class Sampler:
     
     """
@@ -40,7 +61,8 @@ class Sampler:
             sampling step, intead of treating each parameter individually.
     """
     
-    def __init__(self, niter=1000, burn_in=10, seed=None, random_the_long_way=False, use_conj_grad=True, best_type="mean"):
+    def __init__(self, niter=1000, burn_in=10, seed=None, random_the_long_way=False, use_conj_grad=True, best_type="mean",
+                report_every=100):
 
 
         if seed is not None:
@@ -55,6 +77,7 @@ class Sampler:
         self.random_the_long_way = random_the_long_way
         self.use_conj_grad = use_conj_grad
         self.best_type = best_type
+        self.report_every = report_every
         
         self.gain_degeneracies_fixed = False
     
@@ -100,6 +123,9 @@ class Sampler:
         self.freq_range = freq_range
         
         self.file_root = file_root
+        if self.random_the_long_way:
+            self.fops = FourierOps(time_range[1]-time_range[0], freq_range[1]-freq_range[0], nant)
+
             
             
     def load_sim(self, nant, ntime=1, nfreq=1, initial_solve_for_x=False, **kwargs):
@@ -108,6 +134,8 @@ class Sampler:
         self.vis_true = self.vis_redcal
         if initial_solve_for_x:
             self.vis_redcal.x = self.vis_redcal.initial_vals.x = gls_solve(self.vis_redcal)
+        if self.random_the_long_way:
+            self.fops = FourierOps(ntime, nfreq, nant)
 
         self.file_root = ""
             
@@ -151,9 +179,11 @@ class Sampler:
 
         new_x = v_model_sampling.x         # Initialize
         
+        resources = Resources()
+        
         # Take num samples
         for i in range(self.niter):
-
+            
             # Use the sampled x to change the model sampling distribution, and take a sample
             v_model_sampling.x = new_x
             if self.random_the_long_way:
@@ -162,8 +192,9 @@ class Sampler:
                 v_dist_mean, v_dist_covariance = self.new_model_distribution(v_model_sampling)
                 sample = np.random.multivariate_normal(v_dist_mean, v_dist_covariance, 1)
             
-            new_model = unsplit_re_im(sample)
-            sampled_V[i] = new_model.reshape(self.vis_redcal.V_model.shape)
+            new_model = unsplit_re_im(sample).reshape(self.vis_redcal.V_model.shape)
+            v_model_sampling.V_model = new_model
+            sampled_V[i] = new_model
 
             # Use the sampled model to change the x sampling distribution, and take a sample
             v_x_sampling.V_model = sampled_V[i]
@@ -174,7 +205,14 @@ class Sampler:
                 sample = np.random.multivariate_normal(x_dist_mean, x_dist_covariance, 1)  
             
             new_x = self.reform_x_from_samples(sample, self.vis_redcal.x.shape) 
+            v_x_sampling.x = new_x
             sampled_x[i] = new_x
+            
+            if i%self.report_every == 0: 
+                print("Iter", i)
+                resources.report()
+
+            sys.stdout.flush()
 
             
         sampled_x = sampled_x[(self.niter*self.burn_in)//100:]
@@ -227,8 +265,11 @@ class Sampler:
         return v
             
     def remove_unsampled_x(self, x):
-        samples_x = split_re_im(x)    
-        samples_x = np.delete(samples_x, samples_x.shape[3]-1, axis=3)     # Remove unsampled x
+        samples_x = split_re_im(x) 
+        if len(x.shape) == 3:
+            samples_x = np.delete(samples_x, samples_x.shape[2]-1, axis=2) 
+        else: 
+            samples_x = np.delete(samples_x, samples_x.shape[3]-1, axis=3)     # Remove unsampled x
         samples_x = samples_x.reshape(samples_x.shape[0], -1)
             
         return samples_x
@@ -237,7 +278,6 @@ class Sampler:
         x = sampled_x.reshape(shape[0], shape[1], shape[2]*2-1)
         x = restore_x_im(x)
         return unsplit_re_im(x)
-
     
     def plot_marginals(self, parameter, cols, time=None, freq=None, which=[ "True", "Redcal", "Sampled" ]):
         def plot_hist(a, fname, label, sigma_prior, other_vals, index):
@@ -330,6 +370,27 @@ class Sampler:
             
         plt.tight_layout()
         
+    def plot_one_over_time_freq(self, param, sample_index, param_index, time=None, freq=None):
+        assert param in [ "x", "g", "V" ], "param must be x or g or V"
+        assert ((time is None and freq is not None) or (time is not None and freq is None)) \
+            and not (time is None and freq is None), "Invalid specification of time/freq"
+        
+        samples = self.samples[param][sample_index]     # (ntime, nfreq, nparam)
+        if time is not None: 
+            samples = samples[time, :, param_index]
+            title = "Param: "+param+". Time "+str(time)+" over freq. Sample: "+str(sample_index)
+            xlabel = "Freq index"
+        else: 
+            samples = samples[:, freq, param_index]
+            title = "Param: "+param+". Freq "+str(time)+" over time. Sample: "+str(sample_index)
+            xlabel = "Time index"
+        
+        plt.plot(samples.real, label="Real")
+        plt.plot(samples.imag, label="Imag")
+        plt.title(title)
+        plt.xlabel(xlabel)
+        plt.ylabel("Value")
+        plt.legend()
         
     def plot_corner(self, parameters, time=None, freq=None, threshold=0.0, xgs=None, Vs=None):
         assert parameters == ["x", "V"] or parameters == ["g", "v"], "corner plot needs x,V or g,V"
@@ -707,9 +768,9 @@ class Sampler:
         return data_packet
                
     def standard_random_draw(self, size):
-        mean = np.zeros(size)
-        cov = np.eye(size)
-        return np.random.multivariate_normal(mean, cov)
+        
+        return np.random.random(size=size)
+    
     
     def sqrtm(self, m):
         m = scipy.linalg.sqrtm(m)
@@ -740,7 +801,7 @@ class Sampler:
         self.sampled_x = sampled_x
         self.sampled_V = sampled_V
 
-    def r_draw(self, d, A, S_diag, N_diag, fops):
+    def r_draw(self, d, A, S_diag, N_diag, previous_x):
         
         def place_usable_modes(vals):
             xx = np.zeros_like(S_values)
@@ -769,41 +830,36 @@ class Sampler:
         
         # Work on RHS
 
-        sqrt_S_AFT_Ninv_d = (sqrt_S*fops.F_v(np.dot(A.T, N_diag_inv*d)))[usable_modes]
-        sqrt_S_AFT_sqrt_Ninv_omega = (sqrt_S*fops.F_v(np.dot(A.T, np.sqrt(N_diag_inv)*self.standard_random_draw(d.size))))[usable_modes]
+        sqrt_S_AFT_Ninv_d = (sqrt_S*self.fops.F_v(np.dot(A.T, N_diag_inv*d)))[usable_modes]
+        sqrt_S_AFT_sqrt_Ninv_omega = (sqrt_S*self.fops.F_v(np.dot(A.T, np.sqrt(N_diag_inv)*self.standard_random_draw(d.size))))[usable_modes]
         rhs = sqrt_S_AFT_Ninv_d+self.standard_random_draw(usable_modes.size)+sqrt_S_AFT_sqrt_Ninv_omega
 
         # Work on the LHS
         
-        def matvec(x):
+        def matvec(v):
             # Put the x values in the usable mode places. Select them out after we are done
-            return x+(sqrt_S*fops.F_v(np.dot(A.T, N_diag_inv*np.dot(A, fops.F_inv_fft(sqrt_S*place_usable_modes(x))))))[usable_modes]
+            return v+(sqrt_S*self.fops.F_v(np.dot(A.T, N_diag_inv*np.dot(A, 
+            
                  
         def operator():                            
             shape = (usable_modes.size, usable_modes.size)
         
             return scipy.sparse.linalg.LinearOperator(shape, matvec=matvec, dtype=np.float)
         
-        # works (sometimes) if create rhs from the matrix and random vec
-        # or if S_diag = 1
-        # try: condense out the zeros
-        # Priors can't be <= 0 but x values will be after FFT.  Convert S prior to x prior or make all x absoulte (>0)
-        # but there is the inverse fft
-
-        
         op = operator()
-        x_proxy, info = scipy.sparse.linalg.cg(op, rhs)             # Conjugate gradient for stability
+        previous_s = self.fops.F_v(previous_x)[usable_modes]
+
+        x_proxy, info = scipy.sparse.linalg.cg(op, rhs, x0=previous_s)             # Conjugate gradient for stability
         assert info == 0, str(info)
         
         s = sqrt_S*place_usable_modes(x_proxy)
+        x = self.fops.F_inv_fft(s)       # Just converts s to x
         
-        x = fops.F_inv_fft(s)       # Just converts s to x
-        
-
+        #print(np.mean(x), np.std(x))
         return x
 
                            
-    def random_draw(self, first_term, A, S_diag, N_diag):
+    def random_draw(self, first_term, A, S_diag, N_diag, previous_V):
         N_diag_inv = 1/N_diag
         S_diag_inv = 1/S_diag
         S_sqrt = np.sqrt(S_diag)
@@ -818,7 +874,7 @@ class Sampler:
         bracket_term += (A_N_A.T*S_sqrt).T*S_sqrt
 
         if self.use_conj_grad:
-            x, info = scipy.sparse.linalg.cg(bracket_term, rhs)
+            x, info = scipy.sparse.linalg.cg(bracket_term, rhs, x0=previous_V)
             assert info == 0
         else: x = np.dot(np.linalg.inv(bracket_term), rhs)
 
@@ -831,10 +887,11 @@ class Sampler:
     def x_random_draw(self, v):
         A = generate_proj(v.g_bar, v.project_model())  # depends on model
         
-        d = split_re_im(np.ravel(v.get_reduced_observed()))                             
+        d = split_re_im(np.ravel(v.get_reduced_observed())) 
+
+        previous_x = np.ravel(self.remove_unsampled_x(v.x))
         
-        fops = FourierOps(v.ntime, v.nfreq, v.nant)
-        return self.r_draw(d, A, self.S_diag, self.N_diag, fops)
+        return self.r_draw(d, A, self.S_diag, self.N_diag, previous_x)
         
         return self.random_draw(np.dot(A.T, np.dot(np.linalg.inv(N), d)), A, S, N)
         
@@ -849,14 +906,18 @@ class Sampler:
 
         V_mean = split_re_im(np.ravel(self.V_mean))
         d = split_re_im(np.ravel(v.V_obs))
+        
+        previous_V = split_re_im(np.ravel(v.V_model))
 
+        """
         print("V ---------")
         print("d", np.mean(d), np.std(d))
         print("A", np.mean(A), np.std(A))
         print("Cv", np.mean(self.Cv_diag), np.std(self.Cv_diag))
         print("N_diag", np.mean(self.N_diag), np.std(self.N_diag))
+        """
 
-        return self.random_draw(np.dot(A.T, np.multiply(1/self.N_diag, d))+np.multiply(1/self.Cv_diag, V_mean), A, self.Cv_diag, self.N_diag)
+        return self.random_draw(np.dot(A.T, np.multiply(1/self.N_diag, d))+np.multiply(1/self.Cv_diag, V_mean), A, self.Cv_diag, self.N_diag, previous_V)
 
 
 
@@ -1188,9 +1249,10 @@ if __name__ == "__main__":
     from resource import getrusage, RUSAGE_SELF
     from s_manager import SManager
     import matplotlib.pyplot as plt
-    import hickle, os
+    import os, time, hickle, cProfile
+    
 
-    sampler = Sampler(niter=10, burn_in=10, best_type="mean", random_the_long_way=True, use_conj_grad=True)
+    sampler = Sampler(niter=5000, burn_in=10, best_type="mean", random_the_long_way=True, use_conj_grad=True, report_every=100)
     sampler.load_sim(4, ntime=16, nfreq=16, x_sigma=0)
 
     # Fourier mode setup for S
@@ -1198,8 +1260,7 @@ if __name__ == "__main__":
     gauss = lambda x, y: np.exp(-0.5*(x**2+y**2)/.005)
     random = lambda x, y: np.random.random(size=1)
     sm = SManager(16, 16, 4)
-    S_diag = sm.generate_S(gauss)   # Contains all times/freqs
-
+    S_diag = sm.generate_S(gauss, modes=2, ignore_threshold=0, zoom_from=(64, 64), scale=2)    # Contains all times/freqs
 
     # V prior
     V_mean = sampler.vis_redcal.V_model
@@ -1207,18 +1268,18 @@ if __name__ == "__main__":
 
     sampler.set_S_and_V_prior(S_diag, V_mean, Cv_diag)
     
-    
-    """
     start = time.time()
+    #cProfile.run("sampler.run()", filename="sampler.prof", sort="cumulative")
     sampler.run()
 
     print("Run time:", time.time()-start)
     
-    hickle.dump(sampler, 'sampler_'+str(os.getpid())+'.hkl', mode='w', compression='gzip')
+    sampler.fops = None
+    hickle.dump(sampler, "/scratch2/users/hgarsden/sampler_"+str(os.getpid())+".hkl", mode='w', compression='gzip')
     
 
     exit()
-    """
+
  
     x = sampler.x_random_draw(sampler.vis_redcal)
     x = sampler.reform_x_from_samples(x, sampler.vis_redcal.x.shape) 

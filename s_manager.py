@@ -5,21 +5,23 @@ from calcs import split_re_im, unsplit_re_im
 
 class SManager:
     def __init__(self, ntime, nfreq, nant):
+        assert ntime == nfreq
+        assert ntime >=4, "Not enough time/freq for effective FFT"
         self.ntime = ntime
         self.nfreq = nfreq
         self.nant = nant
         self.S = None
         self.fops = FourierOps(ntime, nfreq, nant)
 
-        
-    def generate_S(self, func, modes=None, ignore_threshold=0.01, zoom_from=None, view=False):
+    def generate_S(self, func, modes=None, ignore_threshold=0.01, zoom_from=None, scale=1.0, view=False):
         
         def select(a):
-            good_locations = np.where(a>np.max(a)*ignore_threshold)
+            if ignore_threshold == 0 and modes is None: good_locations = np.arange(a.size, dtype=np.int)
+            else: good_locations = np.where(a>np.max(a)*ignore_threshold)
             print(good_locations[0].size, "modes selected out of", a.size, "("+str(round(good_locations[0].size/a.size, 2)*100)+"%)")
-            b = np.zeros_like(a)
-            b[good_locations] = a[good_locations]
-            return np.array([b, good_locations])
+            vals = np.zeros_like(a)
+            vals[good_locations] = a[good_locations]
+            return np.array([vals, good_locations])
             
         x = np.arange(-1, 1, 2.0/self.ntime)
         y = np.arange(-1, 1, 2.0/self.nfreq)
@@ -44,7 +46,7 @@ class SManager:
             
         for i in range(i_start, i_end, 1):
             for j in range(j_start, j_end, 1):
-                data[i][j] = func(x[i], y[j])
+                data[i][j] = func(x[i], y[j])*scale
                 
         assert np.min(data) >= 0, "S cannot contain negative values"
        
@@ -85,7 +87,7 @@ class SManager:
         """
         assert self.S is not None, "No S is set (use generate_S)"
         assert what in [ "x", "S" ]
-        
+       
         
         if last_ant:
            ant_fft = self.S[0][-self.ntime*self.nfreq:]
@@ -97,8 +99,8 @@ class SManager:
             random_signs = np.where(random_signs>0, 1, -1)
             samples = ant_fft*random_signs
         else:
-            # Assumes all modes are independent
-            samples = np.array([ np.random.normal(scale=var) if var>0 else 0 for var in ant_fft ])
+            # Assumes all modes are independent. Theh value is interpreted as a variance
+            samples = np.array([ np.random.normal(scale=np.sqrt(var)) if var>0 else 0 for var in ant_fft ])
             
         if what == "x":                        # do an inverse FFT
             if last_ant:
