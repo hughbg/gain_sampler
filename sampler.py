@@ -838,7 +838,7 @@ class Sampler:
         
         def matvec(v):
             # Put the x values in the usable mode places. Select them out after we are done
-            return v+(sqrt_S*self.fops.F_v(np.dot(A.T, N_diag_inv*np.dot(A, 
+            return v+(sqrt_S*fops.F_v(np.dot(A.T, N_diag_inv*np.dot(A, fops.F_inv_fft(sqrt_S*place_usable_modes(v))))))[usable_modes]
             
                  
         def operator():                            
@@ -1252,7 +1252,7 @@ if __name__ == "__main__":
     import os, time, hickle, cProfile
     
 
-    sampler = Sampler(niter=5000, burn_in=10, best_type="mean", random_the_long_way=True, use_conj_grad=True, report_every=100)
+    sampler = Sampler(niter=10000, burn_in=10, best_type="mean", random_the_long_way=False, use_conj_grad=True, report_every=100)
     sampler.load_sim(4, ntime=16, nfreq=16, x_sigma=0)
 
     # Fourier mode setup for S
