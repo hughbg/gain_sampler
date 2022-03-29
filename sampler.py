@@ -5,6 +5,7 @@ from gls import gls_solve, generate_proj
 from calcs import split_re_im, unsplit_re_im, BlockMatrix, remove_x_im, restore_x_im, is_diagonal
 from fourier_ops import FourierOps
 from resources import Resources
+from random_streams import RandomStreams
 import hera_cal as hc
 import corner
 import copy
@@ -78,6 +79,7 @@ class Sampler:
         self.use_conj_grad = use_conj_grad
         self.best_type = best_type
         self.report_every = report_every
+        self.seed = seed
         
         self.gain_degeneracies_fixed = False
     
@@ -126,7 +128,8 @@ class Sampler:
         if self.random_the_long_way:
             self.fops = FourierOps(time_range[1]-time_range[0], freq_range[1]-freq_range[0], nant)
 
-            
+        self.random_streams = RandomStreams(self.vis_redcal.V_model.size*2, self.niter*4, self.seed)  # Most we'll need
+
             
     def load_sim(self, nant, ntime=1, nfreq=1, initial_solve_for_x=False, **kwargs):
 
@@ -138,6 +141,8 @@ class Sampler:
             self.fops = FourierOps(ntime, nfreq, nant)
 
         self.file_root = ""
+        
+        self.random_streams = RandomStreams(self.vis_redcal.V_model.size*2, self.niter*4, self.seed)  # Most we'll need
             
     def set_S_and_V_prior(self, S, V_mean, Cv):
         N_diag = np.zeros(0)
@@ -768,8 +773,8 @@ class Sampler:
         return data_packet
                
     def standard_random_draw(self, size):
-        
-        return np.random.random(size=size)
+        #return self.random_streams.draw(size)
+        return np.random.normal(size=size)
     
     
     def sqrtm(self, m):
@@ -1252,7 +1257,7 @@ if __name__ == "__main__":
     import os, time, hickle, cProfile
     
 
-    sampler = Sampler(niter=10000, burn_in=10, best_type="mean", random_the_long_way=True, use_conj_grad=True, report_every=1)
+    sampler = Sampler(niter=10000, burn_in=10, best_type="mean", random_the_long_way=True, use_conj_grad=True, report_every=1000)
     sampler.load_sim(4, ntime=16, nfreq=16, x_sigma=0)
 
     # Fourier mode setup for S
