@@ -2,14 +2,16 @@ import numpy as np
 import pyfftw
 from fourier_ops import FourierOps, FFTWPlan
 from sampler import Sampler
-from gls import generate_proj
-from vis_creator import VisSim
-from calcs import split_re_im, unsplit_re_im
+from vis_creator import VisSim, VisSampling
+from calcs import split_re_im, unsplit_re_im, flatten_complex_2d
 
 np.random.seed(0)
 SQRT_2 = np.sqrt(2)
 
 def percent_diff(x1, x2):
+    x1 = x1[x2>np.max(x2)/1000]      # Ignore values that are very small
+    x2 = x2[x2>np.max(x2)/1000]
+    #return np.max(np.abs((np.ravel(x1)-np.ravel(x2))/np.max(x2)*100))
     return np.max(np.abs((np.ravel(x1)-np.ravel(x2))/np.ravel(x2)*100))
 
 # Test properties of FFT -------------------
@@ -88,35 +90,50 @@ assert abs(np.std(ifft.real)-1)*100 < 0.5 and abs(np.std(ifft.imag)-1)*100 < 0.5
 ntime = 32
 nfreq = 32
 nant = 4
-nvis = 6
 
 fops = FourierOps(ntime, nfreq, nant)
 
 ### TEST
-# Check that forward then back reproduces the original vector
+# Check that FFT forward then back reproduces the original vector
 random_x = np.random.random(size=ntime*nfreq*(nant*2-1))
 x = fops.F_inv_fft(fops.F_v(random_x))
+
 assert percent_diff(random_x, x) < 0.01
 
-            
 ### TEST
 # From a perfect simulation, test that the x values converted to Fourier components
-# work just as well as the x values, to recover the data.
-vis = VisSim(nant, ntime, nfreq)   
-A = generate_proj(vis.g_bar, vis.project_model())
+# work just as well as the x values in real space, to recover the observation.
+vis = VisSampling(VisSim(nant, ntime, nfreq), check_0_im=True, remove_last_x_im=False)
+A = vis.generate_proj_sparse2()
 
-# The FFT of x has to be laid out right
+# The FFT of x has to be laid out right - do it "by hand"
 x = np.reshape(vis.x, (ntime, nfreq, nant))
 x = np.moveaxis(x, 2, 0)
-s = fops.fft2_normed(x)                  
+s = fops.fft2_normed(x)          
+
+# Convert to Fourier space
 condensed = fops.condense_real_fft(s[-1])                       # The last antenna FFT which is of real values needs to be stripped to unique values
-s = np.append(split_re_im(np.ravel(s[:-1])), condensed)         # flatten and split, now length is (self.nant-1)*self.ntime*self.nfreq*2+1*self.ntime*self.nfreq
 
-with_fft = np.dot(A, fops.F_inv_fft(s))                                     # this produces a reduced data array
+s = np.append([ flatten_complex_2d(ant) for ant in s[:-1] ], condensed)     # Form s array needed by inverse FFT
 
-reduced_d = split_re_im(np.ravel(vis.get_reduced_observed()))                          # get reduced data from sim
-percent = (with_fft-reduced_d)/reduced_d*100
-assert percent_diff(with_fft, reduced_d) < 0.5, "percent is "+str(np.max(percent))
+with_fft = A.dot(np.append(fops.F_inv_fft(s), np.zeros(ntime*nfreq)))
+
+reduced_d = vis.reduced_observed_flat                          # get reduced data from sim
+percent = percent_diff(with_fft, reduced_d)
+assert percent < 1, "percent is "+str(percent)
+
+### TEST
+# As for previous test but use the x_flat provided, and FFT it with a fourier_op, nothing "by hand"
+vis = VisSampling(VisSim(nant, ntime, nfreq), check_0_im=True, remove_last_x_im=True)
+A = vis.generate_proj_sparse2()
+
+s = fops.F_v(vis.x_flat)
+
+with_fft = A.dot(fops.F_inv_fft(s))
+
+reduced_d = vis.reduced_observed_flat                          # get reduced data from sim
+percent = percent_diff(with_fft, reduced_d)
+assert percent < 1, "percent is "+str(percent)
 
 
 print("Tests passed")

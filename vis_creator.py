@@ -1,8 +1,9 @@
 import numpy as np
+import scipy.sparse
 import copy
 import hickle as hkl
 from pyuvdata import UVData, UVCal
-from calcs import calc_visibility, split_re_im, unsplit_re_im, BlockMatrix
+from calcs import calc_visibility, split_re_im, unsplit_re_im, BlockMatrix, flatten_complex_2d
 
 class VisSim:
     """
@@ -97,11 +98,19 @@ class VisSim:
                 # The imag value for the last antenna should be 0
                 im[-1] = 0
                 x[time, freq] = re+1j*im
+        
+ 
+        bl_to_ants = []
+        for i in range(nant):
+            for j in range(i+1, nant):
+                bl_to_ants.append((i, j))
+
 
         self.nant = nant
         self.nvis = nvis
         self.ntime = ntime
         self.nfreq = nfreq
+        self.bl_to_ants = bl_to_ants
         self.V_model = self.V_model_orig = V_model
         self.g_bar = self.g_bar_orig = g_bar
         self.x = self.x_orig = x
@@ -116,6 +125,7 @@ class VisSim:
 
         self.model_projection = self.get_model_projection()
         self.V_obs = self.get_simulated_visibilities()
+        self.noise_added = False
 
 
     def get_simulated_visibilities(self, show_working=False):
@@ -510,6 +520,7 @@ class VisCal(VisSim):
         self.redundant_groups = redundant_groups
         self.bl_to_ants = bl_to_ants
         self.model_projection = self.get_model_projection()
+        self.noise_added = True
         
 
 class VisTrue(VisSim):
@@ -598,7 +609,442 @@ class VisTrue(VisSim):
 
         self.bl_to_ants = bl_to_ants
         self.model_projection = self.get_model_projection()
+        self.noise_added = True
         
+
+class VisSampling:
+    
+    def __init__(self, vis, check_0_im=True, ignore_last_x_im=True):
+        
+        self.level = vis.level
+        self.nant = vis.nant
+        self.nvis = vis.nvis
+        self.ntime = vis.ntime
+        self.nfreq = vis.nfreq
+        self.nvis = vis.nvis
+        self.g_bar = vis.g_bar
+        self.V_model = vis.V_model
+        self.x = vis.x
+        self.V_obs = vis.V_obs
+        self.obs_variance = vis.obs_variance
+        self.redundant_groups = vis.redundant_groups
+        self.bl_to_ants = vis.bl_to_ants
+        self.model_projection = vis.model_projection
+        self.noise_added = vis.noise_added
+        self.ignore_last_x_im = ignore_last_x_im
+                
+        self.x_flat = np.ravel([ flatten_complex_2d(ant) for ant in np.moveaxis(self.x, 2, 0) ])
+        assert np.max(np.abs(self.x_flat[-self.ntime*self.nfreq:])) == 0.0, np.max(np.abs(self.x_flat[:-self.ntime*self.nfreq]))
+        
+        if ignore_last_x_im: self.x_flat = self.x_flat[:-self.ntime*self.nfreq]
+        
+        self.V_model_flat = np.ravel(split_re_im(self.V_model))    # Now ordered by (time, freq, split re/im)
+
+        self.reduced_observed_flat = np.ravel(split_re_im(vis.get_reduced_observed()))
+        
+        self.observed_flat = np.ravel(split_re_im(self.V_obs))
+        
+        
+    def get_V_model(self, ti, fi, bl):
+        """ vi is the index of complex vi """
+        return self.V_model_flat[ti*(self.nfreq*self.nvis*2)+fi*self.nvis*2+bl*2] + \
+                    self.V_model_flat[ti*(self.nfreq*self.nvis*2)+fi*self.nvis*2+bl*2+1]*1j
+
+    def get_x(self, ti, fi, xi):
+        """ xi is the index of complex xi """
+        return self.x_flat[xi*2*self.ntime*self.nfreq+ti*self.nfreq+fi] + \
+                    self.x_flat[(xi*2+1)*self.ntime*self.nfreq+ti*self.nfreq+fi] * 1j
+        
+    def generate_proj(self, g_bar, model, remove=True):
+
+        def separate_real_imag(g0, g1, Vm):
+            V = g0*g1*Vm
+            Vij_re = (g0*g1*Vm).real
+            Vij_im = (g0*g1*Vm).imag
+            #print(Vij_re, -Vij_im, Vij_im, Vij_re); exit()
+
+            return Vij_re, Vij_im
+
+        # Generate the projection operator for each time/freq and merge
+        bm = BlockMatrix()
+        for time in range(g_bar.shape[0]):
+            for freq in range(g_bar.shape[1]):
+                proj = np.zeros((model.shape[2]*2, g_bar.shape[2]*2))
+                k = 0
+                for i in range(g_bar.shape[2]):
+                    for j in range(i+1, g_bar.shape[2]):
+                        re, im = separate_real_imag(g_bar[time, freq, i], np.conj(g_bar[time, freq, j]), model[time, freq, k])
+
+                        proj[k*2,i*2] = re; proj[k*2,i*2+1] = -im
+                        proj[k*2,j*2] = re; proj[k*2,j*2+1] = im
+
+                        proj[k*2+1,i*2] = im; proj[k*2+1,i*2+1] = re
+                        proj[k*2+1,j*2] = im; proj[k*2+1,j*2+1] = -re
+
+                        k += 1
+
+
+                if remove: bm.add(remove_x_im(proj))
+                else: bm.add(proj)
+
+        return bm.assemble()
+
+    def generate_proj_sparse(self, g_bar, model, remove=True):
+
+        def separate_real_imag(g0, g1, Vm):
+            V = g0*g1*Vm
+            Vij_re = (g0*g1*Vm).real
+            Vij_im = (g0*g1*Vm).imag
+            #print(Vij_re, -Vij_im, Vij_im, Vij_re); exit()
+
+            return Vij_re, Vij_im
+
+        # Generate the projection operator for each time/freq and merge
+        mats = []
+        for time in range(g_bar.shape[0]):
+            for freq in range(g_bar.shape[1]):
+                proj = np.zeros((model.shape[2]*2, g_bar.shape[2]*2))
+                k = 0
+                for i in range(g_bar.shape[2]):
+                    for j in range(i+1, g_bar.shape[2]):
+                        re, im = separate_real_imag(g_bar[time, freq, i], np.conj(g_bar[time, freq, j]), model[time, freq, k])
+
+                        proj[k*2,i*2] = re; proj[k*2,i*2+1] = -im
+                        proj[k*2,j*2] = re; proj[k*2,j*2+1] = im
+
+                        proj[k*2+1,i*2] = im; proj[k*2+1,i*2+1] = re
+                        proj[k*2+1,j*2] = im; proj[k*2+1,j*2+1] = -re
+
+                        k += 1
+
+
+                if remove: mats.append(scipy.sparse.coo_matrix(remove_x_im(proj)))
+                else: mats.append(scipy.sparse.coo_matrix(proj))
+
+
+        return scipy.sparse.block_diag(mats, format='coo')
+
+    def generate_proj_sparse1(self, g_bar, model, remove=True):
+        """
+        remove: remove the x value that's unnecessary for sampling
+        """
+
+        def separate_real_imag(g0, g1, Vm):
+            V = g0*g1*Vm
+            Vij_re = (g0*g1*Vm).real
+            Vij_im = (g0*g1*Vm).imag
+            #print(Vij_re, -Vij_im, Vij_im, Vij_re); exit()
+
+            return Vij_re, Vij_im
+
+        def make_index_ant(ti, fi, xi):
+            """ Flat index , taking into account the re/im split
+            ai is the index of the x value after splitting,
+            it is not the index of an antenna. Also take into account
+            that there may be a missing x.
+            """
+            if remove: return ti*(nfreq*(nant*2-1))+fi*(nant*2-1)+xi
+            return ti*(nfreq*nant*2)+fi*nant*2+xi
+
+        def make_index_vis(ti, fi, vi):
+            """ Flat index , taking into account the re/im split
+            vi is the index of the visibility value after splitting,
+            it is not the index of a baseline. 
+            """
+            return ti*(nfreq*nvis*2)+fi*nvis*2+vi
+
+        def insert(ti, fi, r, c, val, ind):
+            if not (remove and c == nant*2-1):    # Don't add the missing x
+                row_inds[ind] = make_index_vis(ti, fi, r)
+                col_inds[ind] = make_index_ant(ti, fi, c)
+                data[ind] = val
+
+                return ind+1
+
+            else: return ind
+
+        ntime = g_bar.shape[0]
+        nfreq = g_bar.shape[1]
+        nant = g_bar.shape[2]
+        nvis = model.shape[2]
+
+        nrows = ntime*nfreq*nvis*2
+        if remove: ncols = ntime*nfreq*(nant*2-1)
+        else: ncols = ntime*nfreq*nant*2
+
+        # Generate the projection operator 
+
+        nvalues = ntime*nfreq*nvis*8
+        if remove: nvalues -= ntime*nfreq*(nant-1)*2 # A measure of how many times the last antenna gets involved in a baseline, and then re/im (x2)
+
+        # For the list of data points
+        row_inds = np.zeros(nvalues)
+        col_inds = np.zeros(nvalues)
+        data = np.zeros(nvalues)
+        value_index = 0
+
+        for time in range(ntime):
+            for freq in range(nfreq):
+
+                # Go through the baselines
+                bl = 0
+                for ant1 in range(nant):
+                    for ant2 in range(ant1+1, nant):
+                        re, im = separate_real_imag(g_bar[time, freq, ant1], np.conj(g_bar[time, freq, ant2]), model[time, freq, bl])
+
+                        value_index = insert(time, freq, bl*2, ant1*2, re, value_index)
+                        value_index = insert(time, freq, bl*2, ant1*2+1, -im, value_index)
+                        value_index = insert(time, freq, bl*2, ant2*2, re, value_index)                   
+                        value_index = insert(time, freq, bl*2, ant2*2+1, im, value_index)
+                        value_index = insert(time, freq, bl*2+1, ant1*2, im, value_index)
+                        value_index = insert(time, freq, bl*2+1, ant1*2+1, re, value_index)                
+                        value_index = insert(time, freq, bl*2+1, ant2*2, im, value_index)
+                        value_index = insert(time, freq, bl*2+1, ant2*2+1, -re, value_index)
+
+                        bl += 1
+
+
+        return scipy.sparse.coo_matrix((data, (row_inds, col_inds)), shape=(nrows, ncols))
+
+    def generate_proj_sparse2(self):
+        """
+        The columns of the operator correspond to x values laid out in
+        order of x re/im first, for each one of these there is a block of values
+        of size ntime*nfreq flattened
+        """
+
+        def separate_real_imag(g0, g1, Vm):
+            V = g0*g1*Vm
+            Vij_re = (g0*g1*Vm).real
+            Vij_im = (g0*g1*Vm).imag
+            #print(Vij_re, -Vij_im, Vij_im, Vij_re); exit()
+
+            return Vij_re, Vij_im
+
+        def make_index_ant(ti, fi, xi):
+            """ Flat index , taking into account the re/im split
+            xi is the index of the x value after splitting,
+            it is not the index of an antenna. Also take into account
+            that there may be a missing x, hence factors (nant*2-1).
+
+            """
+
+            return xi*ntime*nfreq+ti*nfreq+fi
+
+        def make_index_vis(ti, fi, vi):
+            """ Flat index , taking into account the re/im split
+            vi is the index of the visibility value after splitting,
+            it is not the index of a baseline. 
+            """
+            return ti*(nfreq*nvis*2)+fi*nvis*2+vi
+
+        def insert(ti, fi, r, c, val, ind):
+            row_inds[ind] = make_index_vis(ti, fi, r)
+            col_inds[ind] = make_index_ant(ti, fi, c)
+            data[ind] = val
+
+
+
+        ntime = self.g_bar.shape[0]
+        nfreq = self.g_bar.shape[1]
+        nant = self.g_bar.shape[2]
+        nvis = self.V_model.shape[2]
+
+        nrows = ntime*nfreq*nvis*2
+        ncols = ntime*nfreq*nant*2
+
+        # Generate the projection operator 
+
+        nvalues = ntime*nfreq*nvis*8    # Num values that will go into the matrix
+
+        # For the list of data points
+        row_inds = np.zeros(nvalues, dtype=np.int)
+        col_inds = np.zeros(nvalues, dtype=np.int)
+        data = np.zeros(nvalues, dtype=np.int)
+        value_index = 0
+
+        for time in range(ntime):
+            for freq in range(nfreq):
+
+                # Go through the baselines
+                bl = 0
+                for ant1 in range(nant):
+                    for ant2 in range(ant1+1, nant):
+                        re, im = separate_real_imag(self.g_bar[time, freq, ant1], np.conj(self.g_bar[time, freq, ant2]), self.get_V_model(time, freq, bl))
+
+                        insert(time, freq, bl*2, ant1*2, re, value_index); value_index += 1
+                        insert(time, freq, bl*2, ant1*2+1, -im, value_index); value_index += 1
+                        insert(time, freq, bl*2, ant2*2, re, value_index); value_index += 1                   
+                        insert(time, freq, bl*2, ant2*2+1, im, value_index); value_index += 1
+                        insert(time, freq, bl*2+1, ant1*2, im, value_index); value_index += 1
+                        insert(time, freq, bl*2+1, ant1*2+1, re, value_index); value_index += 1                
+                        insert(time, freq, bl*2+1, ant2*2, im, value_index); value_index += 1
+                        insert(time, freq, bl*2+1, ant2*2+1, -re, value_index); value_index += 1
+
+                        bl += 1
+
+        if self.ignore_last_x_im:
+            # Knock off the last block of time/freq for the last imaginary x value
+            # These are the last ntime*nfreq columns, leaving columns up to (nant*2-1)*ntime*nfreq
+            row_inds = row_inds[col_inds<(nant*2-1)*ntime*nfreq]
+            data = data[col_inds<(nant*2-1)*ntime*nfreq]
+            col_inds = col_inds[col_inds<(nant*2-1)*ntime*nfreq]
+            ncols = (nant*2-1)*ntime*nfreq
+            
+        return scipy.sparse.coo_matrix((data, (row_inds, col_inds)), shape=(nrows, ncols))
+
+    def generate_proj_sparse3(self, remove_last_x_im=False):
+        """
+        The columns of the operator correspond to x values laid out in
+        order of x re/im first, for each one of these there is a block of values
+        of size ntime*nfreq flattened
+        """
+
+        def separate_real_imag(g0, g1, Vm):
+            V = g0*g1*Vm
+            Vij_re = (g0*g1*Vm).real
+            Vij_im = (g0*g1*Vm).imag
+            #print(Vij_re, -Vij_im, Vij_im, Vij_re); exit()
+
+            return Vij_re, Vij_im
+
+        def make_index_ant(ti, fi, xi):
+            """ Flat index , taking into account the re/im split
+            xi is the index of the x value after splitting,
+            it is not the index of an antenna. Also take into account
+            that there may be a missing x, hence factors (nant*2-1).
+
+            """
+
+            return xi*ntime*nfreq+ti*nfreq+fi
+
+        def make_index_vis(ti, fi, vi):
+            """ Flat index , taking into account the re/im split
+            vi is the index of the visibility value after splitting,
+            it is not the index of a baseline. 
+            """
+            return ti*(nfreq*nvis*2)+fi*nvis*2+vi
+
+        def insert(ti, fi, r, c, val, ind):
+            row_inds[ind] = make_index_vis(ti, fi, r)
+            col_inds[ind] = make_index_ant(ti, fi, c)
+            data[ind] = val
+
+
+
+        ntime = self.g_bar.shape[0]
+        nfreq = self.g_bar.shape[1]
+        nant = self.g_bar.shape[2]
+        nvis = self.V_model.shape[2]
+
+        nrows = ntime*nfreq*nvis*2
+        ncols = ntime*nfreq*nant*2
+
+        # Generate the projection operator 
+
+        nvalues = ntime*nfreq*nvis*8    # Num values that will go into the matrix
+
+        # For the list of data points
+        row_inds = np.zeros(nvalues, dtype=np.int)
+        col_inds = np.zeros(nvalues, dtype=np.int)
+        data = np.zeros(nvalues, dtype=np.int)
+        value_index = 0
+
+        for time in range(ntime):
+            for freq in range(nfreq):
+
+                # Go through the baselines
+                bl = 0
+                for ant1 in range(nant):
+                    for ant2 in range(ant1+1, nant):
+                        re, im = separate_real_imag(self.g_bar[time, freq, ant1], np.conj(self.g_bar[time, freq, ant2]), self.get_V_model(time, freq, bl))
+
+                        insert(time, freq, bl*2, ant1*2, re, value_index); value_index += 1
+                        insert(time, freq, bl*2, ant1*2+1, -im, value_index); value_index += 1
+                        insert(time, freq, bl*2, ant2*2, re, value_index); value_index += 1                   
+                        insert(time, freq, bl*2, ant2*2+1, im, value_index); value_index += 1
+                        insert(time, freq, bl*2+1, ant1*2, im, value_index); value_index += 1
+                        insert(time, freq, bl*2+1, ant1*2+1, re, value_index); value_index += 1                
+                        insert(time, freq, bl*2+1, ant2*2, im, value_index); value_index += 1
+                        insert(time, freq, bl*2+1, ant2*2+1, -re, value_index); value_index += 1
+
+                        bl += 1
+
+        if remove_last_x_im:
+            # Knock off the last block of time/freq for the last imaginary x value
+            # These are the last ntime*nfreq columns, leaving columns up to (nant*2-1)*ntime*nfreq
+            row_inds = row_inds[col_inds<(nant*2-1)*ntime*nfreq]
+            data = data[col_inds<(nant*2-1)*ntime*nfreq]
+            col_inds = col_inds[col_inds<(nant*2-1)*ntime*nfreq]
+            ncols = (nant*2-1)*ntime*nfreq
+            
+        return scipy.sparse.coo_matrix((data, (row_inds, col_inds)), shape=(nrows, ncols))
+
+    
+    def generate_m_proj_sparse1(self):
+        """
+        Generate the projection operator from gain parameter vectors 
+        to visibilities as a CSR sparse array.
+
+        This is a block diagonal array. Each block is for a given time and 
+        frequency. Within each block, the projection operator is constructed 
+        using the appropriate values of g_bar etc. for each antenna pair.
+        """
+        
+        def separate_terms(gi, gj, xi, xj):
+            v = gi*np.conj(gj)*(1+xi+np.conj(xj))
+            return v.real, v.imag
+        
+
+        def make_index_vis(ti, fi, vi):
+            """ Flat index , taking into account the re/im split
+            vi is the index of the visibility value after splitting,
+            it is not the index of a baseline. 
+            """
+            return ti*(self.nfreq*self.nvis*2)+fi*self.nvis*2+vi
+
+        def insert(ti, fi, r, c, val, ind):
+            rows[ind] = make_index_vis(ti, fi, r)
+            cols[ind] = make_index_vis(ti, fi, c)
+            data[ind] = val
+
+                
+        nrows = self.ntime*self.nfreq*self.nvis*2
+        ncols = nrows
+        
+        nvalues = self.ntime*self.nfreq*self.nvis*4
+        value_index = 0
+
+        # Generate the projection operator 
+        rows = np.zeros(nvalues)
+        cols = np.zeros(nvalues)
+        data = np.zeros(nvalues)
+
+        # Loop over times and frequencies
+        for time in range(self.ntime):
+            for freq in range(self.nfreq):
+
+                bl = 0
+                for ant1 in range(self.nant):
+                    for ant2 in range(ant1+1, self.nant):
+                   
+                        term1, term2 = separate_terms(self.g_bar[time, freq, ant1], 
+                                                      self.g_bar[time, freq, ant2], 
+                                                      self.x[time, freq, ant1], 
+                                                      self.x[time, freq, ant2])
+
+                        # Put them in the right place 
+                        insert(time, freq, bl*2, bl*2, term1, value_index); value_index+=1
+                        insert(time, freq, bl*2, bl*2+1, -term2, value_index); value_index+=1
+                        insert(time, freq, bl*2+1, bl*2, term2, value_index); value_index+=1
+                        insert(time, freq, bl*2+1, bl*2+1, term1, value_index); value_index+=1
+                        
+                        bl += 1
+
+
+
+        return scipy.sparse.coo_matrix((data, (rows, cols)), shape=(nrows, ncols))
+
 
 
 
@@ -743,50 +1189,27 @@ def perturb_vis(vis, vis_perturb_percent):
 
     return new_vis
 
-def group_by_x(a):
-    # Reshape so the dimensions are nant, ntime, nfreq
-    return np.moveaxis(a, 2, 0)
 
-def operator_reorder_x_after_fft(nt, nf,nx ): 
-    # For a single time
-    
-    # Make blocks by frequency and combine them
-
-    op = np.zeros((nx*2*nf, nx*2*nf)) 
-    k = 0
-    for ix in range(nx):            
-        for re_im in range(2):
-            for i in range(nf):
-                op[2*nx*i+ix*2+re_im, k] = 1
-                k += 1
-    
-    bm = BlockMatrix()
-    for t in range(nt):
-        bm.add(op)
-    
-    return bm.assemble()
-
-                         
-def multi_fft_operator(nt, nf, nx):
-    op = fourier_operator(nf)
-    bm = BlockMatrix()
-    for i in range(nt):
-        for j in range(nx):
-            for k in range(2):        # real/imag
-                bm.add(op)
-                
-    return bm.assemble()
 
 if __name__ == "__main__":
-    from gls import generate_proj
     
+    np.random.seed(99)
     # Check d = A x
-    v = VisSim(4, ntime=2, nfreq=3)
-    A = generate_proj(v.g_bar, v.V_model, remove=False)
-    o = split_re_im(np.ravel(v.get_reduced_observed()))
-    x = np.ravel(split_re_im((v.x)))
-    print(A.shape, np.ravel(split_re_im((v.x))).shape)
-    p = np.dot(A, np.ravel(split_re_im((v.x))))
+    v = VisSim(6, ntime=2, nfreq=3)
+
+    v = VisSampling(v)
+    print(v.x[1, 0, 2]); 
+    print(v.get_x(1, 0, 2)); exit()
+
+    A = v.generate_proj_sparse2(v.g_bar, v.V_model)
+
+
+    o = v.reduced_observed_flat
+    x = v.x_flat
+
+    p = A.dot(x)
+    for i in range(o.size):
+        print(o[i], p[i])
 
     print("Tol", np.max(abs(o-p)/o))
     

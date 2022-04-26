@@ -50,6 +50,15 @@ def restore_x_im(a):
     slice_shape = list(a.shape)[:-1]+[1]
     return np.concatenate((a, np.zeros(tuple(slice_shape))), axis=len(a.shape)-1)    
 
+def flatten_complex_2d(a):
+    return np.concatenate((a.real, a.imag), axis=None)
+
+def unflatten_complex_2d(a, shape):
+    flat_size = shape[0]*shape[1]     # size of real or imag grid
+    assert a.size == flat_size*2, str(a.size)+" "+str(flat_size*2)
+    make_complex = a[:flat_size]+a[flat_size:]*1j
+    return np.reshape(make_complex, shape)
+
 class BlockMatrix:
     
     def __init__(self):

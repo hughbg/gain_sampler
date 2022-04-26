@@ -1,7 +1,6 @@
 import matplotlib.pyplot as plt
 from mpl_toolkits.axes_grid1 import make_axes_locatable
-from vis_creator import VisSim, VisCal, VisTrue
-from gls import gls_solve, generate_proj
+from vis_creator import VisSim, VisCal, VisTrue, VisSampling
 from calcs import split_re_im, unsplit_re_im, BlockMatrix, remove_x_im, restore_x_im, is_diagonal
 from fourier_ops import FourierOps
 from resources import Resources
@@ -135,8 +134,6 @@ class Sampler:
 
         self.vis_redcal = VisSim(nant, ntime=ntime, nfreq=nfreq, **kwargs)
         self.vis_true = self.vis_redcal
-        if initial_solve_for_x:
-            self.vis_redcal.x = self.vis_redcal.initial_vals.x = gls_solve(self.vis_redcal)
         if self.random_the_long_way:
             self.fops = FourierOps(ntime, nfreq, nant)
 
@@ -145,6 +142,7 @@ class Sampler:
         self.random_streams = RandomStreams(self.vis_redcal.V_model.size*2, self.niter*4, self.seed)  # Most we'll need
             
     def set_S_and_V_prior(self, S, V_mean, Cv):
+
         N_diag = np.zeros(0)
         for time in range(self.vis_redcal.ntime):
             for freq in range(self.vis_redcal.nfreq):
@@ -156,8 +154,8 @@ class Sampler:
                 Cv_diag = np.append(Cv_diag, Cv)
 
 
-        self.S_diag = S
-        self.V_mean = V_mean
+        self.S = S
+        self.V_mean = np.ravel(split_re_im(V_mean))
         self.Cv_diag = Cv_diag
         self.N_diag = N_diag
         
@@ -173,14 +171,21 @@ class Sampler:
             raise RuntimeError("No sim loaded. Can't sample.")
             
         print("Running sampling")
-        sampled_x = np.zeros((self.niter, self.vis_redcal.ntime, self.vis_redcal.nfreq, self.vis_redcal.nant),
+        sampled_x = np.zeros((self.niter, self.vis_redcal.ntime*self.vis_redcal.nfreq*(self.vis_redcal.nant*2-1)),
                             dtype=type(self.vis_redcal.x[0, 0, 0]))   
                                                                 # -1 because there'll be a missing imaginary value
-        sampled_V = np.zeros((self.niter, self.vis_redcal.ntime, self.vis_redcal.nfreq, len(self.vis_redcal.redundant_groups)),
-                             dtype=type(self.vis_redcal.V_model[0, 0, 0]))
+        sampled_V = np.zeros((self.niter, self.vis_redcal.ntime*self.vis_redcal.nfreq*len(self.vis_redcal.redundant_groups)*2),
+                             dtype=type(self.vis_redcal.V_model[0, 0, 0].real))
  
-        v_x_sampling = copy.deepcopy(self.vis_redcal)      
-        v_model_sampling = copy.deepcopy(self.vis_redcal) 
+        v_x_sampling = VisSampling(self.vis_redcal, ignore_last_x_im=True)  
+        v_x_sampling.s_flat = self.fops.F_v(v_x_sampling.x_flat)
+        try:
+            v_x_sampling.s_flat = v_x_sampling.s_flat[self.S.usable_modes]
+        except:
+            raise RuntimeError("S prior is of wrong size")
+
+
+        v_model_sampling = VisSampling(self.vis_redcal) 
 
         new_x = v_model_sampling.x         # Initialize
         
@@ -192,36 +197,50 @@ class Sampler:
             # Use the sampled x to change the model sampling distribution, and take a sample
             v_model_sampling.x = new_x
             if self.random_the_long_way:
-                sample = self.V_random_draw(v_model_sampling)
+                sample = self.V_random_draw_sparse(v_model_sampling)
             else:
                 v_dist_mean, v_dist_covariance = self.new_model_distribution(v_model_sampling)
                 sample = np.random.multivariate_normal(v_dist_mean, v_dist_covariance, 1)
             
-            new_model = unsplit_re_im(sample).reshape(self.vis_redcal.V_model.shape)
-            v_model_sampling.V_model = new_model
-            sampled_V[i] = new_model
+            v_model_sampling.V_model_flat = sample
+            sampled_V[i] = sample
 
             # Use the sampled model to change the x sampling distribution, and take a sample
-            v_x_sampling.V_model = sampled_V[i]
+            v_x_sampling.V_model_flat = sample
             if self.random_the_long_way:
-                sample = self.x_random_draw(v_x_sampling)
+                s_sample, x_sample = self.x_random_draw_sparse(v_x_sampling)
             else:
                 x_dist_mean, x_dist_covariance = self.new_x_distribution(v_x_sampling)
                 sample = np.random.multivariate_normal(x_dist_mean, x_dist_covariance, 1)  
             
-            new_x = self.reform_x_from_samples(sample, self.vis_redcal.x.shape) 
-            v_x_sampling.x = new_x
-            sampled_x[i] = new_x
+            v_x_sampling.x_flat = x_sample
+            v_x_sampling.s_flat = s_sample
+
+            sampled_x[i] = x_sample
             
             if i%self.report_every == 0: 
                 print("Iter", i)
                 resources.report()
 
             sys.stdout.flush()
-
+            
             
         sampled_x = sampled_x[(self.niter*self.burn_in)//100:]
+        # Turn each x into a 3-D array (ntime, nfreq, nant)
+        extra_x_im = np.zeros((sampled_x.shape[0], self.vis_redcal.ntime*self.vis_redcal.nfreq))
+        sampled_x = np.append(sampled_x, extra_x_im, axis=1)  
+        sampled_x = np.reshape(sampled_x, (sampled_x.shape[0], self.vis_redcal.nant*2, self.vis_redcal.ntime, self.vis_redcal.nfreq))         
+        # Now combine the grids into complex numbers
+        sampled_x = sampled_x[:, 0::2]+sampled_x[:, 1::2]*1j
+        sampled_x = np.moveaxis(sampled_x, 1, 3)
+        
+        
         sampled_V = sampled_V[(self.niter*self.burn_in)//100:]
+        # Turn each V into a 3-D array (ntime, nfreq, nvis) 
+        sampled_V = unsplit_re_im(sampled_V)
+        sampled_V = sampled_V.reshape((sampled_V.shape[0], self.vis_redcal.ntime, self.vis_redcal.nfreq, self.vis_redcal.nvis))
+
+        
         sampled_gains = np.zeros_like(sampled_x)
         for i in range(sampled_gains.shape[0]):
             sampled_gains[i] = self.vis_redcal.g_bar*(1+sampled_x[i])
@@ -773,21 +792,10 @@ class Sampler:
         return data_packet
                
     def standard_random_draw(self, size):
-        #return self.random_streams.draw(size)
+
         return np.random.normal(size=size)
     
-    
-    def sqrtm(self, m):
-        m = scipy.linalg.sqrtm(m)
         
-        # np.iscomplex will return False even if the number is complex but the imag
-        # part is 0
-    
-        if np.iscomplex(m[0, 0]):
-            assert not np.any(m.imag), "Square root of matrix is complex - cannot continue"
-            
-        return m.real
-    
     def test_distributions(self):
         sampled_x = np.zeros((self.niter, self.vis_redcal.nant*2-1))       # -1 because there'll be a missing imaginary value
         sampled_V = np.zeros((self.niter, self.V_mean.size*2))
@@ -806,12 +814,8 @@ class Sampler:
         self.sampled_x = sampled_x
         self.sampled_V = sampled_V
 
-    def r_draw(self, d, A, S_diag, N_diag, previous_x):
+    def r_draw(self, d, A, S, N_diag, previous_x):
         
-        def place_usable_modes(vals):
-            xx = np.zeros_like(S_values)
-            xx[usable_modes] = vals
-            return xx
             
         """
         does the dynamic range fixup.
@@ -827,14 +831,13 @@ class Sampler:
        
         # [1 + sqrt(S)(A.T N-1 A)sqrt(S)]x = sqrt(S) A.TN-1 A d + random + sqrt(S)A.T sqrt(N_inv) random
 
-        usable_modes = S_diag[1][0]
-        S_values = S_diag[0]
+        usable_modes = S[1][0]
+        S_values = S[0]
         sqrt_S = np.sqrt(S_values)
 
         N_diag_inv = 1/N_diag
         
         # Work on RHS
-
         sqrt_S_AFT_Ninv_d = (sqrt_S*self.fops.F_v(np.dot(A.T, N_diag_inv*d)))[usable_modes]
         sqrt_S_AFT_sqrt_Ninv_omega = (sqrt_S*self.fops.F_v(np.dot(A.T, np.sqrt(N_diag_inv)*self.standard_random_draw(d.size))))[usable_modes]
         rhs = sqrt_S_AFT_Ninv_d+self.standard_random_draw(usable_modes.size)+sqrt_S_AFT_sqrt_Ninv_omega
@@ -852,15 +855,67 @@ class Sampler:
             return scipy.sparse.linalg.LinearOperator(shape, matvec=matvec, dtype=np.float)
         
         op = operator()
-        previous_s = self.fops.F_v(previous_x)[usable_modes]
+
+        x_proxy, info = scipy.sparse.linalg.cg(op, rhs)             # Conjugate gradient for stability
+        assert info == 0, str(info)
+        
+        s = sqrt_S*place_usable_modes(x_proxy)
+        x = self.fops.F_inv_fft(s)       # Just converts s to x
+
+        return x
+
+    def r_draw_sparse(self, d, A, S, N_diag, previous_s):
+        
+        def place_usable_modes(vals):
+            modes = np.zeros_like(S_values)
+            modes[usable_modes] = vals
+            return modes
+            
+        """
+        does the dynamic range fixup.
+        print(v.nvis, v.nant, v.ntime, v.nfreq, S.shape, N.shape, d.shape, A.shape)
+        
+        #6 4 2 3 (42, 42) (72, 72) (72,) (72, 42)
+        S: (nant*2)-1 * ntime*nfreq
+        ant: ntime*nfreq*(2*nant-1)
+        d: ntime*nfreq*nvis*2
+        N: ntime*nfreq*nvis*2  square
+        A: d x ant
+        """
+       
+        # [1 + sqrt(S)(A.T N-1 A)sqrt(S)]x = sqrt(S) A.TN-1 A d + random + sqrt(S)A.T sqrt(N_inv) random
+
+        usable_modes = S[1][0]
+        S_values = S[0]
+        sqrt_S = np.sqrt(S_values)
+
+        N_diag_inv = 1/N_diag
+        
+        # Work on RHS
+        sqrt_S_AFT_Ninv_d = (sqrt_S*self.fops.F_v((A.T).dot(N_diag_inv*d)))[usable_modes]
+        sqrt_S_AFT_sqrt_Ninv_omega = (sqrt_S*self.fops.F_v((A.T).dot(np.sqrt(N_diag_inv)*self.standard_random_draw(d.size))))[usable_modes]
+        rhs = sqrt_S_AFT_Ninv_d+self.standard_random_draw(usable_modes.size)+sqrt_S_AFT_sqrt_Ninv_omega
+
+        # Work on the LHS
+        
+        def matvec(v):
+            # Put the x values in the usable mode places. Select them out after we are done
+            return v+(sqrt_S*self.fops.F_v((A.T).dot(N_diag_inv*A.dot(self.fops.F_inv_fft(sqrt_S*place_usable_modes(v))))))[usable_modes] 
+            
+                 
+        def operator():                            
+            shape = (usable_modes.size, usable_modes.size)
+        
+            return scipy.sparse.linalg.LinearOperator(shape, matvec=matvec, dtype=np.float)
+        
+        op = operator()
 
         x_proxy, info = scipy.sparse.linalg.cg(op, rhs, x0=previous_s)             # Conjugate gradient for stability
         assert info == 0, str(info)
         
         s = sqrt_S*place_usable_modes(x_proxy)
         x = self.fops.F_inv_fft(s)       # Just converts s to x
-        
-        #print(np.mean(x), np.std(x))
+
         return x
 
                            
@@ -887,20 +942,97 @@ class Sampler:
 
         return x
 
+    def random_draw_sparse(self, b, A, S_diag, N_diag, previous_V):
 
-    
-    def x_random_draw(self, v):
-        A = generate_proj(v.g_bar, v.project_model())  # depends on model
-        
-        d = split_re_im(np.ravel(v.get_reduced_observed())) 
+        # Vectors of matrix diagonals
+        N_diag_inv = 1.0/N_diag
+        S_diag_inv = 1.0/S_diag
+        S_sqrt = np.sqrt(S_diag)
 
-        previous_x = np.ravel(self.remove_unsampled_x(v.x))
+        # Square matrix operator
+        AT_N_A = ((A.T).multiply(N_diag_inv) @ A)
+
+        # Draw unit Gaussian random values
+        omega0 = self.standard_random_draw(A.shape[1])
+        omega1 = self.standard_random_draw(A.shape[0])
+
+        # RHS vector, multiplied through by diagonal S^1/2
+        # Construct RHS vector (operation ordering #1)
+        #rhs = np.multiply(S_sqrt, b) # weight b by S^1/2
+        #rhs += omega0 # omega (unit normal) random vector
+        #rhs += np.multiply(S_sqrt, 
+        #                   (A.T).dot( np.multiply(np.sqrt(N_diag_inv), 
+        #                                          omega1) ))
+
+        # Construct RHS vector (operation ordering #2)
+        rhs = np.multiply(S_sqrt, 
+                          b + (A.T).dot( np.multiply(np.sqrt(N_diag_inv), 
+                                                     omega1) ))
+        rhs += omega0
+
+        # Construct linear operator
+        bracket_term = scipy.sparse.identity(S_diag.size) \
+                     + ((AT_N_A.multiply(S_sqrt)).T).multiply(S_sqrt)
+
+        # Perform sparse CG solve
+        x, info = scipy.sparse.linalg.cg(bracket_term, rhs, x0=previous_V)
+        assert info == 0
+
+        # Multiply solution by S^1/2 and return
+        x = np.multiply(S_sqrt, x)
+
+        return x
+
+       
+    def x_random_draw_sparse(self, v):
+
+        # [1 + sqrt(S)(A.T N-1 A)sqrt(S)]x = sqrt(S) A.TN-1 A d + random + sqrt(S)A.T sqrt(N_inv) random
+
+        def place_usable_modes(vals):
+            modes = np.zeros_like(S_values)
+            modes[usable_modes] = vals
+            return modes
+
+        d = v.reduced_observed_flat
+
+        usable_modes = self.S.usable_modes
+        S_values = self.S.S_values
+        sqrt_S = np.sqrt(S_values)
         
-        return self.r_draw(d, A, self.S_diag, self.N_diag, previous_x)
+        A = v.generate_proj_sparse2()  
+        assert S_values.size == A.shape[1], "S prior is of wrong size"
+
+        N_diag_inv = 1.0/self.N_diag
         
-        return self.random_draw(np.dot(A.T, np.dot(np.linalg.inv(N), d)), A, S, N)
+        # Work on RHS
+        sqrt_S_AFT_Ninv_d = (sqrt_S*self.fops.F_v((A.T).dot(N_diag_inv*d)))[usable_modes]
+        sqrt_S_AFT_sqrt_Ninv_omega = (sqrt_S*self.fops.F_v((A.T).dot(np.sqrt(N_diag_inv)*self.standard_random_draw(d.size))))[usable_modes]
+        rhs = sqrt_S_AFT_Ninv_d+self.standard_random_draw(usable_modes.size)+sqrt_S_AFT_sqrt_Ninv_omega
+
+        # Work on the LHS
         
-    
+        def matvec(v):
+            # Put the x values in the usable mode places. Select them out after we are done
+            return v+(sqrt_S*self.fops.F_v((A.T).dot(N_diag_inv*A.dot(self.fops.F_inv_fft(sqrt_S*place_usable_modes(v))))))[usable_modes] 
+            
+                 
+        def operator():                            
+            shape = (usable_modes.size, usable_modes.size)
+        
+            return scipy.sparse.linalg.LinearOperator(shape, matvec=matvec, dtype=np.float)
+        
+        op = operator()
+
+        previous_s = v.s_flat
+
+        x_proxy, info = scipy.sparse.linalg.cg(op, rhs, x0=previous_s)             # Conjugate gradient for stability
+        assert info == 0, str(info)
+
+        s = sqrt_S*place_usable_modes(x_proxy)
+        x = self.fops.F_inv_fft(s)       # Just converts s to x
+
+        return (s[usable_modes], x)
+     
     def V_random_draw(self, v):
         A = self.generate_m_proj(v)   # Square matrix of shape nvis*2*ntime*nfreq
         bm = BlockMatrix()
@@ -921,10 +1053,106 @@ class Sampler:
         print("Cv", np.mean(self.Cv_diag), np.std(self.Cv_diag))
         print("N_diag", np.mean(self.N_diag), np.std(self.N_diag))
         """
+        
+        # Vectors of matrix diagonals
+        N_diag_inv = 1.0/self.N_diag
+        Cv_sqrt = np.sqrt(Cv_diag)
 
-        return self.random_draw(np.dot(A.T, np.multiply(1/self.N_diag, d))+np.multiply(1/self.Cv_diag, V_mean), A, self.Cv_diag, self.N_diag, previous_V)
+        # Square matrix operator
+        AT_N_A = ((A.T).multiply(N_diag_inv) @ A)
 
+        # Draw unit Gaussian random values
+        omega0 = self.standard_random_draw(A.shape[1])
+        omega1 = self.standard_random_draw(A.shape[0])
 
+        # RHS vector, multiplied through by diagonal S^1/2
+        # Construct RHS vector (operation ordering #1)
+        #rhs = np.multiply(S_sqrt, b) # weight b by S^1/2
+        #rhs += omega0 # omega (unit normal) random vector
+        #rhs += np.multiply(S_sqrt, 
+        #                   (A.T).dot( np.multiply(np.sqrt(N_diag_inv), 
+        #                                          omega1) ))
+
+        # Construct RHS vector (operation ordering #2)
+        rhs = np.multiply(Cv_sqrt, 
+                          b + (A.T).dot( np.multiply(np.sqrt(N_diag_inv), 
+                                                     omega1) ))
+        rhs += omega0
+
+        # Construct linear operator
+        bracket_term = scipy.sparse.identity(Cv_diag.size) \
+                     + ((AT_N_A.multiply(S_sqrt)).T).multiply(Cv_sqrt)
+
+        # Perform sparse CG solve
+        V, info = scipy.sparse.linalg.cg(bracket_term, rhs, x0=previous_V)
+        assert info == 0
+
+        # Multiply solution by S^1/2 and return
+        V = np.multiply(S_sqrt, x)
+
+        return V
+    
+    def V_random_draw_sparse(self, v):
+
+        A = v.generate_m_proj_sparse1()   
+
+        all_model_projections = [ scipy.sparse.coo_matrix(v.model_projection) for i in range(v.ntime*v.nfreq) ]
+        redundant_projector = scipy.sparse.block_diag(all_model_projections, format='coo')
+        A = A.dot(redundant_projector)    # Non square matrix of shape nvis*2*ntime*nfreq x nredundant_vis*2*nreq*ntime
+        
+        d = v.observed_flat
+        previous_V = v.V_model_flat
+
+        # RHS of linear system (vector)
+        b = (A.T).dot( np.multiply(1/self.N_diag, d)) \
+          + np.multiply(1/self.Cv_diag, self.V_mean)
+
+        # Solve linear system
+
+        # Vectors of matrix diagonals
+        N_diag_inv = 1.0/self.N_diag
+        Cv_sqrt = np.sqrt(self.Cv_diag)
+
+        # Square matrix operator
+        AT_N_A = ((A.T).multiply(N_diag_inv) @ A)
+
+        # Draw unit Gaussian random values
+        omega0 = self.standard_random_draw(A.shape[1])
+        omega1 = self.standard_random_draw(A.shape[0])
+
+        # RHS vector, multiplied through by diagonal S^1/2
+        # Construct RHS vector (operation ordering #1)
+        #rhs = np.multiply(S_sqrt, b) # weight b by S^1/2
+        #rhs += omega0 # omega (unit normal) random vector
+        #rhs += np.multiply(S_sqrt, 
+        #                   (A.T).dot( np.multiply(np.sqrt(N_diag_inv), 
+        #                                          omega1) ))
+
+        # Construct RHS vector (operation ordering #2)
+        rhs = np.multiply(Cv_sqrt, 
+                          b + (A.T).dot( np.multiply(np.sqrt(N_diag_inv), 
+                                                     omega1) ))
+        rhs += omega0
+
+        # Construct linear operator
+        bracket_term = scipy.sparse.identity(Cv_sqrt.size) \
+                     + ((AT_N_A.multiply(Cv_sqrt)).T).multiply(Cv_sqrt)
+
+        # Perform sparse CG solve
+        V, info = scipy.sparse.linalg.cg(bracket_term, rhs, x0=previous_V)
+        assert info == 0
+
+        # Multiply solution by S^1/2 and return
+        V = np.multiply(Cv_sqrt, V)
+
+        return V
+    
+    def distribute_redundant_V_samples(self):
+        bm = BlockMatrix()
+        bm.add(v.model_projection, replicate=v.ntime*v.nfreq)
+        redundant_projector = bm.assemble()   # Non square matrix of shape nvis*2*ntime*nfreq x nredundant_vis*2*nreq*ntime
+        print(samples["V"].shape)
+        
 
 
     def new_x_distribution(self, v):
@@ -990,6 +1218,126 @@ class Sampler:
         #print(np.dot(proj, split_re_im(vis.V_model))); exit()
 
         return bm.assemble()
+    
+   
+    def generate_m_proj_sparse(self, vis):
+        """
+        Generate the projection operator from gain parameter vectors 
+        to visibilities as a CSR sparse array.
+
+        This is a block diagonal array. Each block is for a given time and 
+        frequency. Within each block, the projection operator is constructed 
+        using the appropriate values of g_bar etc. for each antenna pair.
+        """
+        proj = np.zeros((vis.nvis*2, vis.nvis*2), dtype=np.float64)
+        mats = []
+
+        # Loop over times and frequencies
+        for time in range(vis.ntime):
+            for freq in range(vis.nfreq):
+                #proj_dok = scipy.sparse.dok_matrix((vis.nvis*2, vis.nvis*2), dtype=np.float64)
+                # Loop over antenna pairs to construct projection matrix
+                proj *= 0.0 # Set all elements to zero
+                k = 0
+                for i in range(vis.nant):
+                    for j in range(i+1, vis.nant):
+                        term1, term2 = self.separate_terms(vis.g_bar[time, freq, i], 
+                                                      vis.g_bar[time, freq, j], 
+                                                      vis.x[time, freq, i], 
+                                                      vis.x[time, freq, j])
+
+                        # Put them in the right place in the bigger matrix
+                        proj[k*2, k*2] = term1
+                        proj[k*2, k*2+1] = -term2
+                        proj[k*2+1, k*2] = term2
+                        proj[k*2+1, k*2+1] = term1
+
+                        #proj_dok[k*2, k*2] = term1
+                        #proj_dok[k*2, k*2+1] = -term2
+                        #proj_dok[k*2+1, k*2] = term2
+                        #proj_dok[k*2+1, k*2+1] = term1
+
+                        k += 1
+
+                # Append this block to a list
+                mats.append(scipy.sparse.coo_matrix(proj))
+
+        # Construct block diagonal sparse array from the projection operator of each antenna pair
+        x = scipy.sparse.block_diag(mats, format='coo').toarray()
+        for i in range(x.shape[0]):
+            for j in range(x.shape[1]):
+                if x[i, j] != 0: print(i, j, x[i, j])
+                
+        exit()
+        return scipy.sparse.block_diag(mats, format='coo')
+    
+    
+
+    def generate_m_proj_sparse1(self, vis):
+        """
+        Generate the projection operator from gain parameter vectors 
+        to visibilities as a CSR sparse array.
+
+        This is a block diagonal array. Each block is for a given time and 
+        frequency. Within each block, the projection operator is constructed 
+        using the appropriate values of g_bar etc. for each antenna pair.
+        """
+        
+
+        def make_index_vis(ti, fi, vi):
+            """ Flat index , taking into account the re/im split
+            vi is the index of the visibility value after splitting,
+            it is not the index of a baseline. 
+            """
+            return ti*(nfreq*nvis*2)+fi*nvis*2+vi
+
+        def insert(ti, fi, r, c, val, ind):
+            rows[ind] = make_index_vis(ti, fi, r)
+            cols[ind] = make_index_vis(ti, fi, c)
+            data[ind] = val
+
+                
+        ntime = vis.g_bar.shape[0]
+        nfreq = vis.g_bar.shape[1]
+        nant = vis.g_bar.shape[2]
+        nvis = vis.V_model.shape[2]
+
+        nrows = ntime*nfreq*nvis*2
+        ncols = nrows
+        
+        nvalues = ntime*nfreq*nvis*4
+        value_index = 0
+
+        # Generate the projection operator 
+        rows = np.zeros(nvalues)
+        cols = np.zeros(nvalues)
+        data = np.zeros(nvalues)
+
+        # Loop over times and frequencies
+        for time in range(vis.ntime):
+            for freq in range(vis.nfreq):
+
+                bl = 0
+                for ant1 in range(vis.nant):
+                    for ant2 in range(ant1+1, vis.nant):
+                        term1, term2 = self.separate_terms(vis.g_bar[time, freq, ant1], 
+                                                      vis.g_bar[time, freq, ant2], 
+                                                      vis.x[time, freq, ant1], 
+                                                      vis.x[time, freq, ant2])
+
+                        # Put them in the right place 
+                        insert(time, freq, bl*2, bl*2, term1, value_index); value_index+=1
+                        insert(time, freq, bl*2, bl*2+1, -term2, value_index); value_index+=1
+                        insert(time, freq, bl*2+1, bl*2, term2, value_index); value_index+=1
+                        insert(time, freq, bl*2+1, bl*2+1, term1, value_index); value_index+=1
+                        
+                        bl += 1
+
+
+        for i in range(len(data)):
+            print(rows[i], cols[i], data[i])
+        exit()
+        return scipy.sparse.coo_matrix((data, (rows, cols)), shape=(nrows, ncols))
 
 
     def new_model_distribution(self, v):
@@ -1256,32 +1604,35 @@ if __name__ == "__main__":
     import matplotlib.pyplot as plt
     import os, time, hickle, cProfile
     
-
-    sampler = Sampler(niter=10000, burn_in=10, best_type="mean", random_the_long_way=True, use_conj_grad=True, report_every=1000)
-    sampler.load_sim(4, ntime=16, nfreq=16, x_sigma=0)
-
+    nant = 20
+    ntime = 16
+    nfreq = 16
+    sampler = Sampler(seed=99, niter=10000, burn_in=10, best_type="mean", random_the_long_way=True, use_conj_grad=True, report_every=1000)
+    sampler.load_sim(nant, ntime=ntime, nfreq=nfreq, x_sigma=0)
+    
     # Fourier mode setup for S
     dc = lambda x, y: 1 if x==0 and y == 0 else 0
     gauss = lambda x, y: np.exp(-0.5*(x**2+y**2)/.005)
     random = lambda x, y: np.random.random(size=1)
-    sm = SManager(16, 16, 4)
-    S_diag = sm.generate_S(gauss, modes=2, ignore_threshold=0, zoom_from=(64, 64), scale=2)    # Contains all times/freqs
+    sm = SManager(nfreq, ntime, nant)
+    sm.generate_S(gauss, modes=2, ignore_threshold=0, zoom_from=(64, 64), scale=2)    # Contains all times/freqs
 
     # V prior
     V_mean = sampler.vis_redcal.V_model
     Cv_diag = np.full(V_mean.shape[2]*2, 2)
 
-    sampler.set_S_and_V_prior(S_diag, V_mean, Cv_diag)
+    sampler.set_S_and_V_prior(sm, V_mean, Cv_diag)
     
     start = time.time()
     #cProfile.run("sampler.run()", filename="sampler.prof", sort="cumulative")
     sampler.run()
 
+
     print("Run time:", time.time()-start)
     
-    sampler.fops = None
+    sampler.fops = sampler.S = None
     hickle.dump(sampler, "/scratch2/users/hgarsden/sampler_"+str(os.getpid())+".hkl", mode='w', compression='gzip')
-    
+    print("Wrote", "/scratch2/users/hgarsden/sampler_"+str(os.getpid())+".hkl")
 
     exit()
 

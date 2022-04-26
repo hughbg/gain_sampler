@@ -1,6 +1,6 @@
 import numpy as np
 from fourier_ops import FourierOps
-from calcs import split_re_im, unsplit_re_im
+from calcs import split_re_im, unsplit_re_im, flatten_complex_2d
 
 
 class SManager:
@@ -10,18 +10,19 @@ class SManager:
         self.ntime = ntime
         self.nfreq = nfreq
         self.nant = nant
-        self.S = None
+        self.S_values = self.usable_modes = None
         self.fops = FourierOps(ntime, nfreq, nant)
 
     def generate_S(self, func, modes=None, ignore_threshold=0.01, zoom_from=None, scale=1.0, view=False):
         
         def select(a):
-            if ignore_threshold == 0 and modes is None: good_locations = np.arange(a.size, dtype=np.int)
-            else: good_locations = np.where(a>np.max(a)*ignore_threshold)
-            print(good_locations[0].size, "modes selected out of", a.size, "("+str(round(good_locations[0].size/a.size, 2)*100)+"%)")
+            if ignore_threshold == 0 and modes is None: 
+                good_locations = np.arange(a.size, dtype=np.int)
+            else: good_locations = np.where(a>np.max(a)*ignore_threshold)[0]
+            print(good_locations.size, "modes selected out of", a.size, "("+str(round(good_locations.size/a.size, 2)*100)+"%)")
             vals = np.zeros_like(a)
             vals[good_locations] = a[good_locations]
-            return np.array([vals, good_locations])
+            return vals, good_locations
             
         x = np.arange(-1, 1, 2.0/self.ntime)
         y = np.arange(-1, 1, 2.0/self.nfreq)
@@ -52,30 +53,41 @@ class SManager:
        
         data[center_x, :] = data[:, center_y] = 0      # DC
         fft = np.fft.fftshift(data+data*1j)
+        fft_flat = np.concatenate((fft.real, fft.imag), axis=None)    # They'll be flattened
+        
 
-
-        S = np.tile(np.ravel(split_re_im(fft)), self.nant-1)      
-        S = np.append(S, self.fops.condense_real_fft(fft)/np.sqrt(2))  # sqrt(2) factor explained in test_fourier.py
+        S = np.tile(fft_flat, self.nant-1)      
+        S = np.append(S, self.fops.condense_real_fft(fft)/np.sqrt(2))  # factor of 2 to make the same sigma 
 
         assert S.size == (self.nant-1)*(self.ntime*self.nfreq*2)+self.ntime*self.nfreq
         
-        self.S = select(S)        # usable modes, S is now 2-D array, data and usable modes
+        self.S_values, self.usable_modes = select(S)        
         
         if view:
             fops = FourierOps(self.ntime, self.nfreq, self.nant)
-            return self.S, data, fops.ifft2_normed(fft)
+            return S, data, fops.ifft2_normed(fft)
                 
-        return self.S
+        # The shape of the data in S is: first index is by antenna, for each of these there is an fft of size ntime*nfreq
+        # split into re/im and flattened. The split between re/im is a block of the real first, then the imag.
+        # However the last fft is condensed because it only ganerates 0 imag values in real space which are ignored. 
+        # The last antenna has a mix of fft real and imag values.
+
+    
+    def S_full(self):
+        assert self.S_values is not None, "S is not set, use generate_S()"
+        all_modes = np.zeros_like(self.S_values)
+        all_modes[self.usable_modes] = self.S_values[self.usable_modes]
+        return all_modes
+
     
     def sigma(self):
-        assert self.S is not None, "No S is set (use generate_S)"
         
         # Use the S but generate +/-ve values around 0
         signs = np.random.normal(size=self.ntime*self.nfreq*2)
         signs = np.where(signs>0, 1, -1)
-        sigma_data = np.std(self.S[0][:self.ntime*self.nfreq*2]*signs)
+        sigma_data = np.std(self.S_full()[:self.ntime*self.nfreq*2]*signs)
                     
-        ifft = unsplit_re_im(self.S[0][:self.ntime*self.nfreq*2]*signs)          # lines reshape to complex array for 1 ant (self.ntime, self.nfreq)
+        ifft = unsplit_re_im(self.S_full[:self.ntime*self.nfreq*2]*signs)          # lines reshape to complex array for 1 ant (self.ntime, self.nfreq)
         ifft = np.reshape(ifft, (self.ntime, self.nfreq))    
         ifft = self.fops.ifft2_normed(ifft)  
         
@@ -83,23 +95,23 @@ class SManager:
     
     def sample(self, what="S", exact=False, last_ant=False):
         """
-        Sample one antenna 
+        Sample the FFT modes of one antenna 
         """
-        assert self.S is not None, "No S is set (use generate_S)"
+        assert self.S_values is not None, "No S is set (use generate_S)"
         assert what in [ "x", "S" ]
        
         
         if last_ant:
-           ant_fft = self.S[0][-self.ntime*self.nfreq:]
+            ant_fft = self.S_full()[-self.ntime*self.nfreq:]
         else:
-           ant_fft = self.S[0][:self.ntime*self.nfreq*2]
+            ant_fft = self.S_full()[:self.ntime*self.nfreq*2]
             
         if exact:
             random_signs = np.random.normal(size=ant_fft.size)
             random_signs = np.where(random_signs>0, 1, -1)
             samples = ant_fft*random_signs
         else:
-            # Assumes all modes are independent. Theh value is interpreted as a variance
+            # Assumes all modes are independent. The value is interpreted as a variance
             samples = np.array([ np.random.normal(scale=np.sqrt(var)) if var>0 else 0 for var in ant_fft ])
             
         if what == "x":                        # do an inverse FFT
@@ -107,10 +119,10 @@ class SManager:
                 fops = FourierOps(self.ntime, self.nfreq, self.nant)
                 fft = fops.expand_real_fft(samples)
             else:
-                fft = np.reshape(unsplit_re_im(samples), (self.ntime, self.nfreq))
+                fft = np.reshape(samples[:self.ntime*self.nfreq]+samples[self.ntime*self.nfreq:]*1j, (self.ntime, self.nfreq))
 
         if what == "x":
-            return split_re_im(np.ravel(self.fops.ifft2_normed(fft)))                
+            return flatten_complex_2d(self.fops.ifft2_normed(fft))          
         else:
             return samples
    
@@ -125,6 +137,7 @@ if __name__ == "__main__":
     flat = lambda x, y: 1
     gauss = lambda x, y: np.exp(-0.5*(x**2+y**2)/.01)
     S, data, _ = sm.generate_S(gauss, view=True)
+
     
     plt.matshow(data)
     plt.savefig("x"); exit()
