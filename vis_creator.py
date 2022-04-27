@@ -393,9 +393,11 @@ class VisCal(VisSim):
             time_range = ( 0, uvdata.Ntimes )
         if freq_range is None:
             freq_range = ( 0, uvdata.Nfreqs )
+
        
         ntime = time_range[1]-time_range[0]
         nfreq = freq_range[1]-freq_range[0]
+
 
         # Load V_obs
         V = np.zeros((ntime, nfreq, nvis), dtype=type(uvdata.get_data(bl_to_ants[0][0], bl_to_ants[0][1], "XX")[0, 0]))
@@ -624,6 +626,7 @@ class VisSampling:
         self.nvis = vis.nvis
         self.g_bar = vis.g_bar
         self.V_model = vis.V_model
+        self.nmodel = vis.V_model.shape[2]
         self.x = vis.x
         self.V_obs = vis.V_obs
         self.obs_variance = vis.obs_variance
@@ -644,16 +647,31 @@ class VisSampling:
         
         self.observed_flat = np.ravel(split_re_im(self.V_obs))
         
+        self.group_mapping = self.map_to_redundant_group()
+
         
     def get_V_model(self, ti, fi, bl):
         """ vi is the index of complex vi """
-        return self.V_model_flat[ti*(self.nfreq*self.nvis*2)+fi*self.nvis*2+bl*2] + \
-                    self.V_model_flat[ti*(self.nfreq*self.nvis*2)+fi*self.nvis*2+bl*2+1]*1j
+        red_group = self.group_mapping[bl]
+        return self.V_model_flat[ti*(self.nfreq*self.nmodel*2)+fi*self.nmodel*2+red_group*2] + \
+                    self.V_model_flat[ti*(self.nfreq*self.nmodel*2)+fi*self.nmodel*2+red_group*2+1]*1j
 
     def get_x(self, ti, fi, xi):
         """ xi is the index of complex xi """
         return self.x_flat[xi*2*self.ntime*self.nfreq+ti*self.nfreq+fi] + \
                     self.x_flat[(xi*2+1)*self.ntime*self.nfreq+ti*self.nfreq+fi] * 1j
+    
+    def map_to_redundant_group(self):
+        
+        mapping = []
+        red_index = 0
+        for red in self.redundant_groups:
+            for bl in red:
+                mapping.append((bl, red_index))
+            red_index += 1
+        mapping.sort()
+
+        return [ mapped[1] for mapped in mapping ]
         
     def generate_proj(self, g_bar, model, remove=True):
 
@@ -836,6 +854,7 @@ class VisSampling:
             vi is the index of the visibility value after splitting,
             it is not the index of a baseline. 
             """
+
             return ti*(nfreq*nvis*2)+fi*nvis*2+vi
 
         def insert(ti, fi, r, c, val, ind):
@@ -844,12 +863,11 @@ class VisSampling:
             data[ind] = val
 
 
-
         ntime = self.g_bar.shape[0]
         nfreq = self.g_bar.shape[1]
         nant = self.g_bar.shape[2]
-        nvis = self.V_model.shape[2]
-
+        nvis = self.V_obs.shape[2]
+        
         nrows = ntime*nfreq*nvis*2
         ncols = ntime*nfreq*nant*2
 
