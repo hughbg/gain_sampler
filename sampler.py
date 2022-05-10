@@ -1,10 +1,11 @@
+#from matplotlib import use; use("Agg")
+
 import matplotlib.pyplot as plt
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 from vis_creator import VisSim, VisCal, VisTrue, VisSampling
 from calcs import split_re_im, unsplit_re_im, BlockMatrix, remove_x_im, restore_x_im, is_diagonal
 from fourier_ops import FourierOps
 from resources import Resources
-from random_streams import RandomStreams
 import hera_cal as hc
 import corner
 import copy
@@ -14,24 +15,22 @@ import sys
 
 
         
-def load_from_files(files):
+def load_from_files(dirname):
     import hickle
-    assert len(files) > 0, "No files"
-    sampler = hickle.load(files[0])
-    for f in files[1:]:
-        s = hickle.load(f)
-        for param in [ "x", "g", "V" ]:
-            assert sampler.samples[param].shape[1:] == s.samples[param].shape[1:]
-            sampler.samples[param] = np.append(sampler.samples[param], s.samples[param], axis=0)
-        sampler.niter += s.niter
-        
+
+    sampler = hickle.load(dirname+"/sampler.hkl")
+    samples = np.load(dirname+"/samples.npz")
+    for param in [ "x", "g", "V" ]:
+        sampler.samples[param] = samples[param]         
         
     # Create an object containing the best fit
-    best_vals = sampler.bests(method=sampler.best_type)
-    sampler.vis_sampled.x = best_vals["x"]
-    sampler.vis_sampled.V_model = best_vals["V"]
+    #best_vals = sampler.bests(method=sampler.best_type)
+    #sampler.vis_sampled.x = best_vals["x"]
+    #sampler.vis_sampled.V_model = best_vals["V"]
     
     return sampler
+
+
 
         
 class Sampler:
@@ -62,7 +61,7 @@ class Sampler:
     """
     
     def __init__(self, niter=1000, burn_in=10, seed=None, random_the_long_way=False, use_conj_grad=True, best_type="mean",
-                report_every=100):
+                report_every=1000):
 
 
         if seed is not None:
@@ -125,9 +124,7 @@ class Sampler:
         
         self.file_root = file_root
         if self.random_the_long_way:
-            self.fops = FourierOps(time_range[1]-time_range[0], freq_range[1]-freq_range[0], nant)
-
-        self.random_streams = RandomStreams(self.vis_redcal.V_model.size*2, self.niter*4, self.seed)  # Most we'll need
+            self.fops = FourierOps(self.vis_redcal.nfreq, self.vis_redcal.ntime, self.vis_redcal.nant)
 
             
     def load_sim(self, nant, ntime=1, nfreq=1, initial_solve_for_x=False, **kwargs):
@@ -138,8 +135,9 @@ class Sampler:
             self.fops = FourierOps(ntime, nfreq, nant)
 
         self.file_root = ""
+        if self.random_the_long_way:
+            self.fops = FourierOps(self.vis_redcal.nfreq, self.vis_redcal.ntime, self.vis_redcal.nant)
         
-        self.random_streams = RandomStreams(self.vis_redcal.V_model.size*2, self.niter*4, self.seed)  # Most we'll need
             
     def set_S_and_V_prior(self, S, V_mean, Cv):
 
@@ -238,7 +236,7 @@ class Sampler:
         sampled_V = sampled_V[(self.niter*self.burn_in)//100:]
         # Turn each V into a 3-D array (ntime, nfreq, nvis) 
         sampled_V = unsplit_re_im(sampled_V)
-        sampled_V = sampled_V.reshape((sampled_V.shape[0], self.vis_redcal.ntime, self.vis_redcal.nfreq, self.vis_redcal.nvis))
+        sampled_V = sampled_V.reshape((sampled_V.shape[0], self.vis_redcal.ntime, self.vis_redcal.nfreq, self.vis_redcal.V_model.shape[2]))
 
         
         sampled_gains = np.zeros_like(sampled_x)
@@ -261,10 +259,10 @@ class Sampler:
         assert what in [ "x", "g", "V" ], "Invalid sample specification"
 
         if time is None and freq is not None:
-            assert False, "Both a time and frequency must be specified"
+            #assert False, "Both a time and frequency must be specified"
             samples = self.samples[what][:, :, freq:freq+1, :]
         elif time is not None and freq is None:
-            assert False, "Both a time and frequency must be specified"
+            #assert False, "Both a time and frequency must be specified"
             samples = self.samples[what][:, time:time+1, :, :]
         elif time is not None and freq is not None:
             samples = self.samples[what][:, time:time+1, freq:freq+1, :]
@@ -276,10 +274,10 @@ class Sampler:
     def select_values_by_time_freq(self, values, time=None, freq=None):
 
         if time is None and freq is not None:
-            assert False, "Both a time and frequency must be specified"
+            #assert False, "Both a time and frequency must be specified"
             v = values[:, freq:freq+1, :]
         elif time is not None and freq is None:
-            assert False, "Both a time and frequency must be specified"
+            #assert False, "Both a time and frequency must be specified"
             v = values[time:time+1, :, :]
         elif time is not None and freq is not None:
             v = values[time:time+1, freq:freq+1, :]
@@ -417,7 +415,7 @@ class Sampler:
         plt.legend()
         
     def plot_corner(self, parameters, time=None, freq=None, threshold=0.0, xgs=None, Vs=None):
-        assert parameters == ["x", "V"] or parameters == ["g", "v"], "corner plot needs x,V or g,V"
+        assert parameters == ["x", "V"] or parameters == ["g", "V"], "corner plot needs x,V or g,V"
         assert threshold >= 0
         assert (threshold == 0.0 and xgs is None and Vs is None) or \
                 (threshold > 0.0 and xgs is None and Vs is None) or \
@@ -571,6 +569,7 @@ class Sampler:
                         print("-----", end="\t")
             if not list_them: print()
             
+            
     def plot_covcorr(self, parameters, time=None, freq=None, stat="corr", threshold=0.0):
         assert len(parameters) == 2, "covariance needs x,V or g,V"
         assert stat == "cov" or stat == "corr", "Specify cov or corr for matrix"
@@ -613,6 +612,8 @@ class Sampler:
         else:
             plt.title("Correlation matrix "+str(parameters))
             
+        plt.savefig("x.png")
+            
     def plot_sample_means(self, parameters, time=None, freq=None):
         assert len(parameters) <= 3, "Too many parameters requested"
         for p in parameters:
@@ -652,8 +653,8 @@ class Sampler:
                  np.abs(v_true[order]), "k", linewidth=0.6,  label="1:1")
         plt.plot(np.abs(v_true[order]), 
                  np.abs(v_redcal[order]), "r", linewidth=0.6,  label="Redcal")
-        plt.plot(np.abs(v_true[order]), 
-                 np.abs(v_sampled[order]), "b", linewidth=0.6,  label="Sampled")
+        #plt.plot(np.abs(v_true[order]), 
+        #         np.abs(v_sampled[order]), "b", linewidth=0.6,  label="Sampled")
         plt.legend()
         plt.xlabel("V_true amplitude")
         plt.ylabel("Amplitude")
@@ -665,8 +666,8 @@ class Sampler:
                  np.angle(v_true.astype(np.complex64)[order]), "k", linewidth=0.6,  label="1:1")
         plt.plot(np.angle(v_true.astype(np.complex64)[order]), 
                  np.angle(v_redcal.astype(np.complex64)[order]), "r", linewidth=0.6,  label="Redcal")
-        plt.plot(np.angle(v_true.astype(np.complex64)[order]), 
-                 np.angle(v_sampled.astype(np.complex64)[order]), "b", linewidth=0.6,  label="Sampled")
+        #plt.plot(np.angle(v_true.astype(np.complex64)[order]), 
+        #         np.angle(v_sampled.astype(np.complex64)[order]), "b", linewidth=0.6,  label="Sampled")
         plt.legend()
         plt.xlabel("V_true phase")
         plt.ylabel("Phase")
@@ -1408,6 +1409,28 @@ class Sampler:
 
         return dist_mean, dist_covariance
     
+    def distribute_redundant_V_samples(self):
+        bm = BlockMatrix()
+        bm.add(self.vis_redcal.model_projection, replicate=self.vis_redcal.ntime*self.vis_redcal.nfreq)
+        redundant_projector = bm.assemble()   # Non square matrix of shape nvis*2*ntime*nfreq x nredundant_vis*2*nreq*ntime
+
+        
+        V = np.matmul(redundant_projector, split_re_im(self.samples["V"].reshape(self.samples["V"].shape[0], -1)).T)
+        V = unsplit_re_im(V.T)
+        V = V.reshape(V.shape[0], self.vis_redcal.ntime, self.vis_redcal.nfreq, -1)
+        
+        return V
+    
+    def v_samp_V_unredundant(self):
+        bm = BlockMatrix()
+        bm.add(self.vis_redcal.model_projection, replicate=self.vis_redcal.ntime*self.vis_redcal.nfreq)
+        redundant_projector = bm.assemble()   # Non square matrix of shape nvis*2*ntime*nfreq x nredundant_vis*2*nreq*ntime
+        
+        V = np.dot(redundant_projector, np.ravel(split_re_im(self.vis_sampled.V_model)))
+        V = unsplit_re_im(V)
+        V = np.reshape(V, (self.vis_redcal.ntime, self.vis_redcal.nfreq, -1))
+        return V
+    
     def bests(self, parameters=["x", "V"], method="mean"):
         def peak(a):
             # Get the peak 
@@ -1604,17 +1627,24 @@ if __name__ == "__main__":
     import matplotlib.pyplot as plt
     import os, time, hickle, cProfile
     
-    nant = 20
-    ntime = 16
-    nfreq = 16
-    sampler = Sampler(seed=99, niter=10000, burn_in=10, best_type="mean", random_the_long_way=True, use_conj_grad=True, report_every=1000)
-    sampler.load_sim(nant, ntime=ntime, nfreq=nfreq, x_sigma=0)
+    sampler = load_from_files("/scratch2/users/hgarsden/sampler_viscatBC_outlier7_1.1_1781388")      
+    sampler.plot_covcorr(["x", "V"], time=None, freq=None)
+    usage = getrusage(RUSAGE_SELF)
+    print("SIM", usage.ru_maxrss/1000.0/1000)      # Usage in GB
+
+    exit()
     
+    file_root = "/scratch3/users/hgarsden/catall/calibration_points/viscatBC"
+    sampler = Sampler(seed=99, niter=10000, burn_in=10, best_type="mean", random_the_long_way=True, use_conj_grad=True, report_every=1000)
+    sampler.load_nr_sim(file_root)   
+    #sampler.load_sim(20, 40, 40)
+
     # Fourier mode setup for S
     dc = lambda x, y: 1 if x==0 and y == 0 else 0
     gauss = lambda x, y: np.exp(-0.5*(x**2+y**2)/.005)
     random = lambda x, y: np.random.random(size=1)
-    sm = SManager(nfreq, ntime, nant)
+
+    sm = SManager(sampler.vis_redcal.ntime, sampler.vis_redcal.nfreq, sampler.vis_redcal.nant)
     sm.generate_S(gauss, modes=2, ignore_threshold=0, zoom_from=(64, 64), scale=2)    # Contains all times/freqs
 
     # V prior
@@ -1630,9 +1660,14 @@ if __name__ == "__main__":
 
     print("Run time:", time.time()-start)
     
-    sampler.fops = sampler.S = None
-    hickle.dump(sampler, "/scratch2/users/hgarsden/sampler_"+str(os.getpid())+".hkl", mode='w', compression='gzip')
-    print("Wrote", "/scratch2/users/hgarsden/sampler_"+str(os.getpid())+".hkl")
+    dirname = "/scratch2/users/hgarsden/sampler_"+file_root.split("/")[-1]+"_"+str(os.getpid()) 
+    try:
+        os.mkdir(dirname)
+    except: pass
+    np.savez_compressed(dirname+"/"+"samples", x=sampler.samples["x"], g=sampler.samples["g"], V=sampler.samples["V"])
+    sampler.fops = sampler.S = sampler.samples["x"] = sampler.samples["g"] = sampler.samples["V"] =None
+    hickle.dump(sampler, dirname+"/sampler.hkl", mode='w', compression='gzip')
+    print("Wrote", dirname)
 
     exit()
 

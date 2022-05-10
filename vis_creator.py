@@ -389,6 +389,15 @@ class VisCal(VisSim):
                 "Data does not contain expected number of baselines"
         nvis = len(bl_to_ants)
         
+        self.baseline_lengths = np.zeros(nvis)
+        k = 0
+        for i in range(nant):
+            for j in range(i+1, nant):
+                diff = uvdata.antenna_positions[i]-uvdata.antenna_positions[j]
+                self.baseline_lengths[k] = np.sqrt(np.sum(diff**2))
+                k += 1
+        print(self.baseline_lengths); exit()
+  
         if time_range is None:
             time_range = ( 0, uvdata.Ntimes )
         if freq_range is None:
@@ -403,6 +412,7 @@ class VisCal(VisSim):
         V = np.zeros((ntime, nfreq, nvis), dtype=type(uvdata.get_data(bl_to_ants[0][0], bl_to_ants[0][1], "XX")[0, 0]))
         for i, bl in enumerate(bl_to_ants):
             V[:, :, i] = uvdata.get_data(bl[0], bl[1], "XX")[time_range[0]:time_range[1], freq_range[0]:freq_range[1]]
+
 
         # Get things out of calibration: model, redundant groups, weights
 
