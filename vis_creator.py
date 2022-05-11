@@ -396,7 +396,6 @@ class VisCal(VisSim):
                 diff = uvdata.antenna_positions[i]-uvdata.antenna_positions[j]
                 self.baseline_lengths[k] = np.sqrt(np.sum(diff**2))
                 k += 1
-        print(self.baseline_lengths); exit()
   
         if time_range is None:
             time_range = ( 0, uvdata.Ntimes )
