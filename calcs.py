@@ -88,10 +88,16 @@ class BlockMatrix:
 
         return block_matrix
     
+import scipy.stats
+def print_statistics(x):
+    print("Mean:", "{:4f}".format(np.mean(x)), "Sigma:", "{:4f}".format(np.std(x)), "Skew:", "{:4f}".format(scipy.stats.skew(x, axis=None)), "Kurtosis:", "{:4f}".format(scipy.stats.kurtosis(x, axis=None)))
+    print("Min:", "{:4f}".format(np.min(x)), "Max:", "{:4f}".format(np.max(x)))
+    percentiles = [ 99, 95, 90, 80, 70 ]
+    ps_vals = np.percentile(np.abs(x), percentiles)
+    for i, ps in enumerate(percentiles):
+        
+        print(ps, "percentile:", "{:4f}".format(ps_vals[i]))
+    
 if __name__ == "__main__":
-    bm = BlockMatrix()
-    bm.add(np.array([1, 1]))
-    bm.add(np.array([[2,2,2],[2,2]]))
-    bm.add(np.array([1, 1]))
-    print(bm.assemble())
+    print_statistics(np.random.normal(size=1000, scale=1))
            
