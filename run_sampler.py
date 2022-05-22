@@ -18,8 +18,8 @@ sampler = Sampler(seed=99, niter=cfg["niter"], burn_in=10, best_type=cfg["best_t
 sampler.load_nr_sim(cfg["file_root"])   
 
 # Fourier mode setup for S
-if cfg["modes"]["pattern"] == "dc":
-    pattern = lambda x, y: 1 if x==0 and y == 0 else 0
+if cfg["modes"]["pattern"] == "flat":
+    pattern = lambda x, y: 1 
 elif cfg["modes"]["pattern"] == "gauss":
     pattern = lambda x, y: np.exp(-0.5*(x**2+y**2)/.005)
 elif cfg["modes"]["pattern"] == "random":
@@ -46,7 +46,7 @@ sampler.run()
 
 print("Run time:", time.time()-start)
 
-case = os.path.basename(sys.argv[1][:-5]).split("_")[1:]
+case = os.path.basename(cfg["orig_yaml"][:-5]).split("_")[1:]
 if len(case) > 0 :case = "_"+"_".join(case)
 else: case = ""
 dirname = os.path.dirname(cfg["file_root"])+"/sampled_"+os.path.basename(cfg["file_root"])+case

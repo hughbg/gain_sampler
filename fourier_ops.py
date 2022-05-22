@@ -61,12 +61,12 @@ class FourierOps:
     def fft2_normed(self, data):
         # data of shape (nant, ntime, nfreq)
         #return self.plan_forward.execute(data)/data.shape[1]
-        return np.fft.fft2(data)/data.shape[1]   # Normalization to preserve standard deviation not Parsevals
+        return np.fft.fft2(data)/data.shape[1]   # Normalization
     
     def ifft2_normed(self, data):
         # data of shape (nant, ntime, nfreq)
         #return self.plan_backward.execute(data)*data.shape[1]
-        return np.fft.ifft2(data)*data.shape[1]  # Normalization to preserve standard deviation not Parsevals
+        return np.fft.ifft2(data)*data.shape[1]  # Normalization 
  
     def condense_real_fft(self, a):
         # a: complex 2-D FFT of real values

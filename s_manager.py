@@ -13,7 +13,7 @@ class SManager:
         self.S_values = self.usable_modes = None
         self.fops = FourierOps(ntime, nfreq, nant)
 
-    def generate_S(self, func, modes=None, ignore_threshold=0.01, zoom_from=None, scale=1.0, view=False):
+    def generate_S(self, func, modes=None, ignore_threshold=0.01, zoom_from=None, scale=1, view=False):
         
         def select(a):
             if ignore_threshold == 0 and modes is None: 
@@ -45,19 +45,28 @@ class SManager:
             i_end = center_x+modes+1
             j_end = center_y+modes+1
             
+
         for i in range(i_start, i_end, 1):
             for j in range(j_start, j_end, 1):
                 data[i][j] = func(x[i], y[j])*scale
-                
+
+            
         assert np.min(data) >= 0, "S cannot contain negative values"
        
-        data[center_x, :] = data[:, center_y] = 0      # DC
-        fft = np.fft.fftshift(data+data*1j)
+        data[center_x, :] = 0
+        data[:, center_y] = 0      # DC
+        
+        # Now we can control the sigma of the x values that will be generated. See parsevals.ipynb
+        # The sigma of the x_real and x_imag values will be the sigma of data. 
+        #data *= x_prior_sigma/np.std(data)
+        
+        fft = np.fft.fftshift(data+data*1j)        
+        
         fft_flat = np.concatenate((fft.real, fft.imag), axis=None)    # They'll be flattened
         
 
         S = np.tile(fft_flat, self.nant-1)      
-        S = np.append(S, self.fops.condense_real_fft(fft)/np.sqrt(2))  # factor of 2 to make the same sigma 
+        S = np.append(S, self.fops.condense_real_fft(fft)/2)  # factor of 2 to make the same sigma 
 
         assert S.size == (self.nant-1)*(self.ntime*self.nfreq*2)+self.ntime*self.nfreq
         
@@ -136,7 +145,7 @@ if __name__ == "__main__":
     dc = lambda x, y: 1 if x==0 and y == 0 else 0
     flat = lambda x, y: 1
     gauss = lambda x, y: np.exp(-0.5*(x**2+y**2)/.01)
-    S, data, _ = sm.generate_S(gauss, view=True)
+    S, data, _ = sm.generate_S(gauss, modes=8, view=True)
 
     
     plt.matshow(data)
