@@ -92,7 +92,7 @@ import scipy.stats
 def print_statistics(x):
     print("Mean:", "{:4f}".format(np.mean(x)), "Sigma:", "{:4f}".format(np.std(x)), "Skew:", "{:4f}".format(scipy.stats.skew(x, axis=None)), "Kurtosis:", "{:4f}".format(scipy.stats.kurtosis(x, axis=None)))
     print("Min:", "{:4f}".format(np.min(x)), "Max:", "{:4f}".format(np.max(x)))
-    percentiles = [ 99, 95, 90, 80, 70 ]
+    percentiles = [ 99.9, 99, 95, 90, 80, 70 ]
     ps_vals = np.percentile(np.abs(x), percentiles)
     for i, ps in enumerate(percentiles):
         

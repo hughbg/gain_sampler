@@ -15,7 +15,8 @@ with open(sys.argv[1]) as f:
 sampler = Sampler(seed=99, niter=cfg["niter"], burn_in=10, best_type=cfg["best_type"], best_use=cfg["best_use"],
                   best_measure=cfg["best_measure"], random_the_long_way=True, use_conj_grad=True, 
                   report_every=cfg["report_every"])
-sampler.load_nr_sim(cfg["file_root"])   
+sampler.load_nr_sim(cfg["file_root"], with_redcal=cfg["with_redcal"], remove_redundancy=cfg["remove_redundancy"])   
+print("redal chi2", sampler.vis_redcal.get_chi2(over_all=True))
 
 # Fourier mode setup for S
 if cfg["modes"]["pattern"] == "flat":
@@ -38,12 +39,15 @@ Cv_diag = np.full(V_mean.shape[2]*2, cfg["priors"]["Cv"])
 
 sampler.set_S_and_V_prior(sm, V_mean, Cv_diag)
 
+if cfg["fix_degeneracies"] == "before": sampler.fix_degeneracies()
+
 start = time.time()
 #cProfile.run("sampler.run()", filename="sampler.prof", sort="cumulative")
 
 sampler.run()
 
-
+if cfg["fix_degeneracies"] == "after": sampler.fix_degeneracies()
+    
 print("Run time:", time.time()-start)
 
 case = os.path.basename(cfg["orig_yaml"][:-5]).split("_")[1:]
@@ -55,6 +59,9 @@ try:
     os.mkdir(dirname)
 except: pass
 np.savez_compressed(dirname+"/"+"samples", x=sampler.samples["x"], g=sampler.samples["g"], V=sampler.samples["V"])
-sampler.fops = sampler.S = sampler.samples["x"] = sampler.samples["g"] = sampler.samples["V"] =None
+sampler.fops = sampler.S = sampler.samples["x"] = sampler.samples["g"] = sampler.samples["V"] = None
+sampler.cfg = cfg
+print("redcal chi2", sampler.vis_redcal.get_chi2(over_all=True))
 hickle.dump(sampler, dirname+"/sampler.hkl", mode='w', compression='gzip')
+
 print("Wrote", dirname)

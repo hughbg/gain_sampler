@@ -75,7 +75,7 @@ class Sampler:
         self.burn_in = burn_in
         self.random_the_long_way = random_the_long_way
         self.use_conj_grad = use_conj_grad
-        if best_type in [ "mean", "peak", "ml" ]:
+        if best_type in [ "mean", "median", "peak", "ml" ]:
             self.best_type = best_type
         else:
             raise ValueError("best_type has invalid value: "+str(best_type))
@@ -92,8 +92,11 @@ class Sampler:
         self.seed = seed
         
         self.gain_degeneracies_fixed = False
+        
+        self.samples = None
     
-    def load_nr_sim(self, file_root, time_range=None, freq_range=None, remove_redundancy=False, initial_solve_for_x=False):
+    def load_nr_sim(self, file_root, time_range=None, freq_range=None, remove_redundancy=False, 
+                    with_redcal=True, initial_solve_for_x=False):
         """
         Load a simulation from the Non-Redundant pipeline.
 
@@ -123,8 +126,12 @@ class Sampler:
         
 
         print("Loading NR sim from", file_root)
-        self.vis_redcal = VisCal(file_root, time_range=time_range, freq_range=freq_range, remove_redundancy=remove_redundancy) 
         self.vis_true = VisTrue(file_root, time_range=time_range, freq_range=freq_range)
+        if with_redcal:
+            self.vis_redcal = VisCal(file_root, time_range=time_range, freq_range=freq_range, 
+                                     remove_redundancy=remove_redundancy) 
+        else:
+            self.vis_redcal = self.vis_true
 
         if initial_solve_for_x:
             self.vis_redcal.x = self.vis_redcal.initial_vals.x = gls_solve(self.vis_redcal)
@@ -420,7 +427,7 @@ class Sampler:
         plt.tight_layout()
         plt.savefig("x.png")
         
-    def plot_one_over_time_freq(self, param, sample_index, param_index, time=None, freq=None):
+    def plot_one_over_time_freq(self, param, sample_index, param_index, time=None, freq=None, plot_to=None):
         assert param in [ "x", "g", "V" ], "param must be x or g or V"
         assert ((time is None and freq is not None) or (time is not None and freq is None)) \
             and not (time is None and freq is None), "Invalid specification of time/freq"
@@ -432,7 +439,7 @@ class Sampler:
             xlabel = "Freq index"
         else: 
             samples = samples[:, freq, param_index]
-            title = "Param: "+param+". Freq "+str(time)+" over time. Sample: "+str(sample_index)
+            title = "Param: "+param+". Freq "+str(freq)+" over time. Sample: "+str(sample_index)
             xlabel = "Time index"
         
         plt.plot(samples.real, label="Real")
@@ -442,9 +449,13 @@ class Sampler:
         plt.ylabel("Value")
         plt.legend()
         
-    def plot_corner(self, parameters, time, freq, threshold=0.0, baselines=None):
+        if plot_to is not None:
+            plt.savefig(plot_to+".pdf")
+
+        
+    def plot_corner(self, parameters, time, freq, threshold=0.0, baselines=None, plot_to=None):
         assert parameters == ["x", "V"] or parameters == ["g", "V"], "corner plot needs x,V or g,V"
-        assert threshold >= 0
+        assert threshold >= 0, "threshold must be >= 0"
         assert not (threshold > 0.0 and baselines is not None), "Can't specify threshold and baselines at the same time"
                
         
@@ -481,11 +492,14 @@ class Sampler:
         if baselines is not None:
             # baselines are in redundant groups. Find the which group baselines are in
             groups = []
+
             for i in range(len(self.vis_sampled.redundant_groups)):
                 for bl in baselines:
                     if bl in self.vis_sampled.redundant_groups[i] and i not in groups:
                        groups.append(i)
-            print(groups)        
+
+            assert len(groups) > 0, "Can't find baselines "+str(baselines)     
+            
             # Find the antennas
             ants = []
             for bl in baselines:
@@ -509,8 +523,8 @@ class Sampler:
             data_packet["x_or_g_len"] = num_x_left
             data_packet["V_len"] = data_packet["data"].shape[1]-num_x_left
             
-            assert num_x_left <= data_packet["V_len"]*4    # N baselines can only map up to N*2 ants which are split re/im
-            assert data_packet["data"].shape[1] == len(labels)
+            assert num_x_left <= data_packet["V_len"]*4, "Too many values "+str(num_x_left)+" > "+str(data_packet["V_len"]*4)    # N baselines can only map up to N*2 ants which are split re/im
+            assert data_packet["data"].shape[1] == len(labels), "Incorrect number of labels "+str(data_packet["data"].shape[1])+ " vs "+str(len(labels))
             assert data_packet["data"].shape[0] > 0, "No parameters to plot"
             
 
@@ -552,10 +566,13 @@ class Sampler:
             ax.axvline(orig[i], color="red", linewidth=0.5)
         """
         plt.tight_layout()
+        
+        if plot_to is not None:
+            plt.savefig(plot_to+".pdf")
    
         #return figure
         
-    def plot_trace(self, parameter, time=None, freq=None, index=None):
+    def plot_trace(self, parameter, time=None, freq=None, index=None, plot_to=None):
         assert isinstance(parameter, str), "trace parameter must be string"
         assert parameter in [ "x", "g", "V" ], "Unknown parameter: "+parameter
         
@@ -580,6 +597,10 @@ class Sampler:
         plt.xlabel("Sample iteration")
         plt.ylabel(parameter)
         plt.title("Traces for "+parameter)
+        
+        if plot_to is not None:
+            plt.savefig(plot_to+".pdf")
+
                  
     def print_covcorr(self, parameters, time=None, freq=None, stat="corr", threshold=0.0, list_them=False, count_them=False):
         assert len(parameters) == 2, "covariance needs x,V or g,V"
@@ -647,7 +668,7 @@ class Sampler:
             
             
     def plot_covcorr(self, parameters, time=None, freq=None, stat="corr", threshold=0.0, 
-                     hist=False, log=False, to_file=None):
+                     hist=False, log=False, plot_to=None):
         assert len(parameters) == 2, "covariance needs x,V or g,V"
         assert stat == "cov" or stat == "corr", "Specify cov or corr for matrix"
         assert threshold >= 0
@@ -671,9 +692,10 @@ class Sampler:
             
             histogram, bin_edges = np.histogram(m, bins=100)
             plt.plot((bin_edges[:-1]+bin_edges[1:])/2, histogram)
+            if log: plt.yscale("log")
             plt.xlabel(stat.capitalize())
             plt.ylabel("Count")
-            if to_file is not None: plt.savefig(to_file)
+            if plot_to is not None: plt.savefig(plot_to+".pdf")
             return
         
         
@@ -706,7 +728,8 @@ class Sampler:
         else:
             plt.title("Correlation matrix "+str(parameters))
             
-        if to_file is not None: plt.savefig(to_file)
+        if plot_to is not None:
+            plt.savefig(plot_to+".pdf")
             
     def plot_sample_means(self, parameters, time=None, freq=None):
         assert len(parameters) <= 3, "Too many parameters requested"
@@ -794,7 +817,7 @@ class Sampler:
         plt.title("Calibrated visibilities (Phase)")
         plt.tight_layout()
         
-    def plot_gains(self, time=None, freq=None, sigma=3):
+    def plot_gains(self, time=None, freq=None, sigma=3, plot_to=None):
         def normalize_phases(phases):
             # Make sure phases are between -pi, pi
             phases = np.where(phases>3*np.pi/2, phases-2*np.pi, phases)
@@ -837,8 +860,8 @@ class Sampler:
 
         g_true = self.select_values_by_time_freq(self.vis_true.get_antenna_gains(), time, freq)
         g_redcal = self.select_values_by_time_freq(self.vis_redcal.get_antenna_gains(), time, freq)
-        g_sampled = self.select_values_by_time_freq(self.vis_sampled.get_antenna_gains(), time, freq)      
-        
+        g_sampled = self.bests("g", time=time, freq=freq, method=self.best_type, measure=self.best_measure)["g"]
+
         g_true = np.ravel(g_true)
         g_redcal = np.ravel(g_redcal)
         g_sampled = np.ravel(g_sampled)
@@ -871,13 +894,13 @@ class Sampler:
         plt.subplot(2, 1, 2)
 
         # 1. V true. The gains are 1? Can't remember why
-        plt.plot(range(g_true.size), np.angle(g_true), color="green", linewidth=0.6, label="g_true")
+        plt.plot(range(g_true.size), np.unwrap(np.angle(g_true)), color="green", linewidth=0.6, label="g_true")
 
         # 2. The redcal gains as they are given to us by redcal.
-        plt.plot(range(g_true.size), np.angle(g_redcal.astype(np.complex64)), "r", linewidth=0.6, label="g_redcal")
+        plt.plot(range(g_true.size), np.unwrap(np.angle(g_redcal.astype(np.complex64))), "r", linewidth=0.6, label="g_redcal")
 
         # 3. The sampled gains, actually x is sampled. 
-        plt.plot(range(g_true.size), np.angle(g_sampled.astype(np.complex64)), "b", linewidth=0.6, label="g_sampled")
+        plt.plot(range(g_true.size), np.unwrap(np.angle(g_sampled.astype(np.complex64))), "b", linewidth=0.6, label="g_sampled")
         
         # Error bars
         assert error_phase.shape[0] == g_true.size
@@ -888,6 +911,10 @@ class Sampler:
         plt.xlabel("Antenna")
         plt.ylabel("Phase (rad)")
         plt.tight_layout()
+                        
+        if plot_to is not None:
+            plt.savefig(plot_to+".pdf")
+       
         
 
     def assemble_data(self, parameters, time, freq, remove_0_x=True):
@@ -1552,9 +1579,10 @@ class Sampler:
         V = np.reshape(V, (self.vis_redcal.ntime, self.vis_redcal.nfreq, -1))
         return V
     
-    def bests(self, parameter, method="mean", measure="rms"):
+    def bests(self, parameter, time=None, freq=None, method="mean", measure="rms"):
         """
         parameter: x or g
+        measure is only used for method="ml"
         """
         
         def peak(a):
@@ -1567,12 +1595,17 @@ class Sampler:
 
         best_dict = {}
         
-        if method in [ "mean", "peak" ]:
+        samples = { parameter: self.select_samples_by_time_freq(parameter, time, freq),
+                       "V": self.select_samples_by_time_freq("V", time, freq)
+                      }
+        if method in [ "mean", "peak", "median" ]:
             for p in [ parameter, "V" ]:
-                shape = self.samples[p].shape
-                data = split_re_im(self.samples[p].reshape(shape[0], -1))
+                shape = samples[p].shape
+                data = split_re_im(samples[p].reshape(shape[0], -1))
                 if method == "mean":
                     result = np.mean(data, axis=0)
+                elif method == "median":
+                    result = np.median(data, axis=0)
                 else:
                     result = np.array([ peak(data[:, i]) for i in range(data.shape[1]) ])
                 best_dict[p] = unsplit_re_im(result).reshape(shape[1:])   
@@ -1586,13 +1619,13 @@ class Sampler:
                 best = -1e39            # Want biggest
             else: best = 1e39           # Want smallest
             where_best = 0
-            for i in range(self.samples["x"].shape[0]):   
+            for i in range(samples["x"].shape[0]):   
                 if parameter == "x":
-                    vv.x = self.samples["x"][i]    
+                    vv.x = samples["x"][i]    
                 else:
-                    vv.g = self.samples["g"][i]  
+                    vv.g = samples["g"][i]  
 
-                vv.V_model = self.samples["V"][i]  
+                vv.V_model = samples["V"][i]  
                 if measure == "likelihood":
                     lh = vv.get_unnormalized_likelihood(over_all=True)
                     if lh > best:
@@ -1605,8 +1638,8 @@ class Sampler:
                         best = rms
                     
             # Return best values but this doesn't alter vis_sampled
-            best_dict[parameter] = self.samples[parameter][where_best]
-            best_dict["V"] = self.samples["V"][where_best]
+            best_dict[parameter] = samples[parameter][where_best]
+            best_dict["V"] = samples["V"][where_best]
         else:
             raise ValueError("Invalid method")
 
@@ -1664,23 +1697,26 @@ class Sampler:
             return stripped
         
         def fix(cal, gains, gains_dict):
-                # Fix degeneracies on gains
+                # Fix degeneracies on "gains"
 
             for i in range(self.vis_redcal.nant):
                 gains_dict[(i, "Jee")] = gains[:, :, i]
                 
-            new_gains = RedCal.remove_degen_gains(gains_dict, 
+            new_gains = RedCal.remove_degen_gains(gains_dict,             # Dict containing 2D array of complex gain solutions for each antenna 
                                               degen_gains=true_gains, 
                                               mode='complex')
             return un_key(new_gains)
         
         assert len(self.file_root) > 0, "This is not a non-redundant sim. Can't fix degeneracies."
+
+        print("Fixing degeneracies")
         
         if self.gain_degeneracies_fixed:
             print("Degeneracies already fixed. Nothing to do.")
             return
         
         # Need the redundant groups in the right format, antenna pairs and ee pol
+        # Redundancy might have been removed but that's ok because each bl in a group still.
         reds = []
         for rg in self.vis_redcal.redundant_groups:
             new_rg = []
@@ -1720,30 +1756,33 @@ class Sampler:
         RedCal = hc.redcal.RedundantCalibrator(reds)
         gains_dict = {}             # this is just used for temp space
         
+        # We want to find x_new so that fix(g_bar(1+x)) = fix(g_bar)(1+x_new)
+        #   x_new = fix(g_bar(1+x))/fix(g_bar) - 1
+        
         # Fix all the samples
         
-        # Now fix the sampled gains and adjust the x values
-        for i in range(self.samples["g"].shape[0]):
-            samples_orig_x = np.copy(self.samples["x"][i])
-            samples_orig_g = np.copy(self.samples["g"][i])
-            self.samples["g"][i] = fix(RedCal, samples_orig_g, gains_dict)
-            
-            # Recalculate x
-            self.samples["x"][i] = samples_orig_g*(1+samples_orig_x)/self.samples["g"][i] - 1
+        fixed_g_bar = fix(RedCal, self.vis_redcal.g_bar.astype(np.complex128), gains_dict)
+        
+        if self.samples is not None:
+            # Now fix the sampled gains and adjust the x values
+            for i in range(self.samples["g"].shape[0]):
+
+                self.samples["g"][i] = fix(RedCal, self.samples["g"][i], gains_dict)     # fix(g_bar(1+x))
+
+                # Recalculate x
+                self.samples["x"][i] = self.samples["g"][i]/fixed_g_bar - 1
   
         # Fix redcal gains
-    
-        self.vis_redcal.g_bar = fix(RedCal, self.vis_sampled.get_antenna_gains().astype(np.complex64), gains_dict)
-        self.vis_redcal.x.fill(0)            # should be 0 unless initial_solve_for_x
+        fix_g_bar_1_plus_x = fix(RedCal, self.vis_redcal.get_antenna_gains().astype(np.complex128), gains_dict)
+        self.vis_redcal.x = fix_g_bar_1_plus_x/fixed_g_bar - 1  # Update x
+        self.vis_redcal.g_bar = fixed_g_bar
 
-        # Fix the x best sample
-        
-        orig_g = self.vis_sampled.g_bar
-        orig_x = self.vis_sampled.x
+        if self.samples is not None:
+            # Fix the x best sample
+            fix_g_bar_1_plus_x = fix(RedCal, self.vis_sampled.get_antenna_gains().astype(np.complex128), gains_dict)
+            self.vis_sampled.x = fix_g_bar_1_plus_x/fixed_g_bar - 1  # Update x
+            self.vis_sampled.g_bar = fixed_g_bar
 
-        self.vis_sampled.g_bar = self.vis_redcal.g_bar      # Update gain
-        self.vis_sampled.x = (orig_g*(1+orig_x))/self.vis_sampled.g_bar - 1  # Update x
-                          
         self.gain_degeneracies_fixed = True
     
 
@@ -1754,21 +1793,13 @@ if __name__ == "__main__":
     import matplotlib.pyplot as plt
     import os, time, hickle, cProfile
     
-    sampler = load_from_files("/data/scratch/apw737/catall_nobright/sampled_viscatBC")      
-    #sampler.plot_covcorr(["x", "V"], time=None, freq=None, hist=True, to_file="x.png")
-    #sampler.examine_all_for_gaussianity()
-    print(len(sampler.vis_true.redundant_groups))
-    print(len(sampler.vis_redcal.redundant_groups))
-    print(len(sampler.vis_sampled.redundant_groups))
-    sampler.plot_corner(["x", "V"], time=0, freq=0, baselines=[2, 37])
-    usage = getrusage(RUSAGE_SELF)
-    print("SIM", usage.ru_maxrss/1000.0/1000)      # Usage in GB
-
-    exit()
+    file_root = "/data/scratch/apw737/catall_nobright/viscatBC"
+    sampler = Sampler(seed=99, niter=100, burn_in=10, best_type="mean", random_the_long_way=True, use_conj_grad=True, report_every=1000)
+    sampler.load_nr_sim(file_root, remove_redundancy=False) 
     
-    file_root = "/scratch3/users/hgarsden/catall/calibration_points/viscatBC"
-    sampler = Sampler(seed=99, niter=10000, burn_in=10, best_type="mean", random_the_long_way=True, use_conj_grad=True, report_every=1000)
-    sampler.load_nr_sim(file_root)   
+    print(np.mean(sampler.vis_redcal.chi2["Jee"]))
+    print(sampler.vis_redcal.get_chi2(over_all=True))
+    exit()
     #sampler.load_sim(20, 40, 40)
 
     # Fourier mode setup for S
@@ -1788,6 +1819,8 @@ if __name__ == "__main__":
     start = time.time()
     #cProfile.run("sampler.run()", filename="sampler.prof", sort="cumulative")
     sampler.run()
+    sampler.fix_degeneracies()
+    exit()
 
 
     print("Run time:", time.time()-start)
