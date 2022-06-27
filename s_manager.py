@@ -14,38 +14,47 @@ class SManager:
         self.fops = FourierOps(ntime, nfreq, nant)
 
     def generate_S(self, func, modes=None, ignore_threshold=0.01, zoom_from=None, scale=1, view=False):
+        # ignore_threshold is fractional
         
         def select(a):
-            if ignore_threshold == 0 and modes is None: 
-                good_locations = np.arange(a.size, dtype=np.int)
-            else: good_locations = np.where(a>np.max(a)*ignore_threshold)[0]
-            print(good_locations.size, "modes selected out of", a.size, "("+str(round(good_locations.size/a.size, 2)*100)+"%)")
+            good_locations = np.where(a>np.max(a)*ignore_threshold)[0]
+            print(good_locations.size, "modes selected out of", a.size, "("+str(round(good_locations.size/a.size, 2)*100)+"%)", "(zero-valued modes are also ignored)")
             vals = np.zeros_like(a)
             vals[good_locations] = a[good_locations]
             return vals, good_locations
+        
+        assert 0 <= ignore_threshold and ignore_threshold < 1, "ignore_threshold must be in [0, 1)"
+        assert modes is None or (isinstance(modes, int) and modes > 0), "modes must be a positive integer"
+        assert (isinstance(scale, float) or isinstance(scale, int)) and scale > 0, "scale must be a positive number"
+        assert isinstance(zoom_from, tuple) and (isinstance(zoom_from[0], int) and zoom_from[0] > 0) and \
+                (isinstance(zoom_from[1], int) and zoom_from[1] > 0), "zoom_from must be a pair of positive integers"
             
-        x = np.arange(-1, 1, 2.0/self.ntime)
+        x = np.arange(-1, 1, 2.0/self.ntime)    # ntime values from [-1, 1)
         y = np.arange(-1, 1, 2.0/self.nfreq)
         
         if zoom_from is not None:
-            x *= x.size/zoom_from[0]
+            x *= x.size/zoom_from[0]             # ntime values from [-1, 1)*x.size/zoom_from[0]
             y *= y.size/zoom_from[1]
         
         assert x.size == self.ntime and y.size == self.nfreq
         
         data = np.zeros((x.size, y.size))
-        center_x = data.shape[0]//2
+        center_x = data.shape[0]//2                    # if ntime=16 this will be 8
         center_y = data.shape[1]//2
         if modes is None:
             i_start = j_start = 0
-            i_end = j_end = x.size
+            i_end = x.size; j_end = y.size
         else:
-            i_start = center_x-modes
+            i_start = center_x-modes                  
             j_start = center_y-modes
-            i_end = center_x+modes+1
-            j_end = center_y+modes+1
+            i_end = center_x+modes+1                  # If ntime=16 and modes=8 this will be [0, 17). The end 17 is too high
+            j_end = center_y+modes+1                  # If ntime=16 and modes=4 the range will be [4, 13) giving 4 either side of DC
             
-
+            if i_start < 0 or j_start < 0 or self.ntime < i_end or self.nfreq < j_end:
+                print("WARNING: Too many modes requested. All non-zero modes will be used.")
+                i_start = j_start = 0
+                i_end = x.size; j_end = y.size
+                
         for i in range(i_start, i_end, 1):
             for j in range(j_start, j_end, 1):
                 data[i][j] = func(x[i], y[j])*scale
@@ -55,6 +64,8 @@ class SManager:
        
         data[center_x, :] = 0
         data[:, center_y] = 0      # DC
+        
+        assert np.sum(data) > 0, "All modes are zero-valued"
         
         # Now we can control the sigma of the x values that will be generated. See parsevals.ipynb
         # The sigma of the x_real and x_imag values will be the sigma of data. 

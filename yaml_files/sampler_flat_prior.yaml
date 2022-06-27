@@ -1,0 +1,19 @@
+priors:
+        Cv: 2
+        V_offset: 0
+
+modes:
+        pattern: flat
+        num:               # Will use all modes
+        zoom_from:
+        - 64
+        - 64
+        scale: .012
+        
+file_root: /data/scratch/apw737/catall_nobright/viscatBC
+niter: 10000
+best_type: median
+best_use: x 
+best_measure: rms 
+report_every: 1000
+with_redcal: True

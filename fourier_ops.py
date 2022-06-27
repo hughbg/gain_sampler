@@ -75,7 +75,7 @@ class FourierOps:
 
         N = a.shape[0]
 
-        assert N%2 == 0
+        assert N%2 == 0, "Number of times/freqs must be even"
 
         # Extract the uniq complex values, picking them out of a
         unique = np.empty(N*N//2+2, dtype=np.complex128)
@@ -187,3 +187,4 @@ if __name__ == "__main__":
     data = np.random.normal(size=(8, 8))
     np.allclose(f.expand_real_fft1(data).real, f.expand_real_fft(data).real)    
     np.allclose(f.expand_real_fft1(data).imag, f.expand_real_fft(data).imag)
+

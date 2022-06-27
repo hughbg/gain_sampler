@@ -161,9 +161,10 @@ class VisSim:
                     for j in range(i+1, self.nant):
                         V[k] = calc_visibility(self.level, self.g_bar[time, freq, i], self.g_bar[time, freq, j], 
                                                V_model[time, freq, k], self.x[time, freq, i], self.x[time, freq, j])
+
                         if show_working:
                             if self.level == "approx":
-                                print(self.V_obs[k], "=?", "[", V[time, freq, k], "]", V_model[time, freq, k], "x", self.g_bar[time, freq, i], "x", np.conj(self.g_bar[time, freq, j]), 
+                                print(self.V_obs[time, freq, k], "=?", "[", V[k], "]", V_model[time, freq, k], "x", self.g_bar[time, freq, i], "x", np.conj(self.g_bar[time, freq, j]), 
                                     "(1 +", self.x[time, freq, i], "+", np.conj(self.x[time, freq, j]), ")")
                             else:
                                 print(self.V_obs[time, freq, k], "=?", "[", V[time, freq, k], "]", V_model[time, freq, k], "x", self.g_bar[time, freq, i], "x", np.conj(self.g_bar[time, freq, j]), 
@@ -321,7 +322,18 @@ class VisSim:
             return likelihoods
         
         
-    def plot_power_spectrum(self):
+    def plot_power_spectrum(self, mask_0_delay=False, chop_left=0, plot_to=None):
+        """
+        Plot a raw power spectrum of calibrated visibiities from this object
+        
+        mask_0_delay: bool
+            Assuming the the number of frequencies is even, 0 out the DC part of the
+            power spectrum, which reduces the dynamic range and allows the wedge to be seen more clearly.
+        chop_left: int
+            Fill the left of the power spectrum with zeros, up until pixel index `chop_left' from the left 
+            edge. This removes high power from short beaslines which reduces the dynamic range and allows 
+            the wedge to be seen more clearly.
+        """
         if self.baseline_lengths is None:
             print("No baseline lengths in object, can't generate power spectrum")
             
@@ -338,24 +350,88 @@ class VisSim:
                     
         for group in range(len(self.redundant_groups)):
             ps[group] /= nums[group]
-            
+        
+
+        ps[:chop_left] = 0    
+        if mask_0_delay: 
+            print(ps.shape)
+            print(np.sum(ps))
+            ps[:, self.V_obs.shape[1]//2] = 0
+            print(np.sum(ps))
+
         plt.matshow(ps.T[::-1], norm=LogNorm())
         plt.xlabel("Redundant groups")
         plt.ylabel("Delay")
         plt.colorbar()
-                   
+        if plot_to is not None:
+            plt.savefig(plot_to+".png")
+            
+    def plot_data(self, parameter, cols, what, plot_to=None):
+        """
+        Plot all gains and visibilities from this object (g_bar and V_model)
         
-    def v_samp_V_unredundant(self):
+        Each antenna, or each baseline, has a grid of values indexed by time and frequency.
+        All of these grids are plotted.
+        """
+        
+        def plot_block(a, title, index):
+            
+            plt.subplot(rows, cols, index)
+            plt.imshow(a, cmap="twilight")
+            plt.xlabel("freq")
+            plt.ylabel("time")
+            plt.colorbar(fraction=0.1)
+            plt.title(title)
+            
+        print("Plot", parameter, what)
+
+        if parameter == "g": 
+            num_plots = self.g_bar.shape[2]
+            title = "g "+what
+            data = self.g_bar.astype(np.complex64)
+        else: 
+            num_plots = self.V_model.shape[2]
+            title = "V "+what
+            data = self.V_model
+            
+        if num_plots%cols == 0: rows = num_plots//cols
+        else: rows = num_plots//cols+1
+        
+        if what == "amp":
+            data = np.abs(data)
+        else:
+            data = np.angle(data)
+            
+        for i in range(num_plots):
+            plot_block(data[:, :, i], title+" "+str(i), i+1)
+            
+        plt.tight_layout()
+        
+        if plot_to is not None:
+            plt.savefig(plot_to+".pdf")
+        
+
+                           
+        
+    def remove_redundancy(self):
         bm = BlockMatrix()
-        bm.add(self.vis_redcal.model_projection, replicate=self.vis_redcal.ntime*self.vis_redcal.nfreq)
+        bm.add(self.model_projection, replicate=self.ntime*self.nfreq)
         redundant_projector = bm.assemble()   # Non square matrix of shape nvis*2*ntime*nfreq x nredundant_vis*2*nreq*ntime
         
-        V = np.dot(redundant_projector, np.ravel(split_re_im(self.vis_sampled.V_model)))
+        V = np.dot(redundant_projector, np.ravel(split_re_im(self.V_model)))
         V = unsplit_re_im(V)
-        V = np.reshape(V, (self.vis_redcal.ntime, self.vis_redcal.nfreq, -1))
+        V = np.reshape(V, (self.ntime, self.nfreq, -1))
+        self.V_model = V
+        
+        
+        self.redundant_groups = [ [i] for i in range(self.nvis) ]
+        self.model_projection = self.get_model_projection()
+        
         return V
 
-        
+    def fold_x_into_gains():
+        self.g_bar *= (1+self.x)
+        self.x.fill(0)
 
     
     def get_model_projection(self):
@@ -405,8 +481,9 @@ class VisSim:
         """
         
         gains = {}
+        antenna_gains = self.get_antenna_gains()
         for i in range(self.g_bar.shape[2]):
-            gains[(i, 'Jee')] = self.g_bar[:, :, i]        
+            gains[(i, 'Jee')] = antenna_gains[:, :, i]        
             
         weights = {}
         
@@ -416,7 +493,13 @@ class VisSim:
         elif self.obs_variance is not None:
             for i in range(self.V_obs.shape[2]):
                 weights[(self.bl_to_ants[i][0], self.bl_to_ants[i][1], 'ee')] = np.real(self.obs_variance[:, :, i])
-
+         
+        """
+        dof = (self.nvis-len(self.redundant_groups)-self.nant+2)*self.ntime*self.nfreq
+        
+        chi2 = np.sum(np.abs(self.V_obs-self.get_simulated_visibilities())**2/self.weights)/dof
+        print(chi2); exit()
+        """
             
         """
         keys = weights.keys()
@@ -529,12 +612,18 @@ class VisCal(VisSim):
        
         ntime = time_range[1]-time_range[0]
         nfreq = freq_range[1]-freq_range[0]
+        
+        fname = file_root+"_g_cal.uvh5"
+        uvcal_data = UVData()
+        uvcal_data.read_uvh5(fname)
 
 
         # Load V_obs
         V = np.zeros((ntime, nfreq, nvis), dtype=type(uvdata.get_data(bl_to_ants[0][0], bl_to_ants[0][1], "XX")[0, 0]))
+        self.V_cal = np.zeros((ntime, nfreq, nvis), dtype=type(uvdata.get_data(bl_to_ants[0][0], bl_to_ants[0][1], "XX")[0, 0]))
         for i, bl in enumerate(bl_to_ants):
             V[:, :, i] = uvdata.get_data(bl[0], bl[1], "XX")[time_range[0]:time_range[1], freq_range[0]:freq_range[1]]
+            self.V_cal[:, :, i] = uvcal_data.get_data(bl[0], bl[1], "XX")[time_range[0]:time_range[1], freq_range[0]:freq_range[1]]
 
 
         # Get things out of calibration: model, redundant groups, weights
@@ -580,7 +669,7 @@ class VisCal(VisSim):
             for bl in red[1:]:
                 for time in range(ntime):
                     for freq in range(nfreq):
-                        assert V_model[time, freq, bl] == V_model[time, freq, red[0]]
+                        assert np.allclose(V_model[time, freq, bl], V_model[time, freq, red[0]], atol=1e-5), "Red groups not the same "+str(V_model[time, freq, bl])+" "+str(V_model[time, freq, red[0]])
                 
         # Now we are going to fiddle with the redundancy and compact the 
         # list of models if there is redundancy
@@ -604,7 +693,7 @@ class VisCal(VisSim):
                 i = bl_to_ants.index((key[1], key[0]))
             weights[:, :, i] = cal["omni_meta"]["data_wgts"][key][time_range[0]:time_range[1], freq_range[0]:freq_range[1]]
         self.weights = weights
-
+        np.save("weights", self.weights)
         
         # Get the noise
         fname = file_root+"_nn.npz"
@@ -614,12 +703,13 @@ class VisCal(VisSim):
         noise = np.zeros((ntime, nfreq, nvis), dtype=type(V[0, 0, 0]))
         for i, bl in enumerate(bl_to_ants):
             noise[:, :, i] = uvdata.get_data(bl[0], bl[1], "XX")[time_range[0]:time_range[1], freq_range[0]:freq_range[1]]
-        if np.min(noise.imag) < 0: noise = np.conj(noise)        # In case uvdata has screwed around with the values
+        noise = noise.real**2+noise.imag**2*1j       
+        np.save("noise", noise.real)
 
         # Get the gains generated from calibration
         g_bar = np.zeros((ntime, nfreq, nant), dtype=type(V[0]))
         if degeneracy_fix:
-            fname = file_root+"_g_new.calfits"
+            fname = file_root+"_g_new.calfits"   # Contain already 
             print("Get gains from", fname)
             uvc = UVCal()
             uvc.read_calfits(fname)
@@ -723,7 +813,6 @@ class VisTrue(VisSim):
         g_bar = np.zeros((ntime, nfreq, nant), dtype=type(V_model[0, 0, 0]))
         for i in range(nant):
             g_bar[:, :, i] = uvc.get_gains(i).T[time_range[0]:time_range[1], freq_range[0]:freq_range[1]]
-
 
 
         # Get V_obs
@@ -1371,23 +1460,8 @@ def perturb_vis(vis, vis_perturb_percent):
 
 if __name__ == "__main__":
     
-    np.random.seed(99)
-    # Check d = A x
-    v = VisSim(6, ntime=2, nfreq=3)
 
-    v = VisSampling(v)
-    print(v.x[1, 0, 2]); 
-    print(v.get_x(1, 0, 2)); exit()
+    vc = VisCal("/data/scratch/apw737/catall_nobright/viscatBC_4a_0.02")
 
-    A = v.generate_proj_sparse2(v.g_bar, v.V_model)
-
-
-    o = v.reduced_observed_flat
-    x = v.x_flat
-
-    p = A.dot(x)
-    for i in range(o.size):
-        print(o[i], p[i])
-
-    print("Tol", np.max(abs(o-p)/o))
+    print(vc.get_rms())
     

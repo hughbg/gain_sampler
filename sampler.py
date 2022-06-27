@@ -12,6 +12,7 @@ import copy
 import numpy as np
 import scipy.linalg, scipy.sparse, scipy.sparse.linalg
 import sys
+import hera_cal as hc
 
 
         
@@ -775,16 +776,16 @@ class Sampler:
             print(name, "Slope:", new_series[-1], "Error:", info[0][0])
 
    
-        self.fix_degeneracies()
+        #self.fix_degeneracies()
         print("Plot results")
         
         v_true = self.select_values_by_time_freq(self.vis_true.V_model, time, freq)
         v_redcal = self.select_values_by_time_freq(self.vis_redcal.get_calibrated_visibilities(), time, freq)
         v_sampled = self.select_values_by_time_freq(self.vis_sampled.get_calibrated_visibilities(), time, freq)
 
-        v_true = split_re_im(np.ravel(v_true))
-        v_redcal = split_re_im(np.ravel(v_redcal))
-        v_sampled = split_re_im(np.ravel(v_sampled))
+        v_true = np.ravel(v_true)
+        v_redcal = np.ravel(v_redcal)
+        v_sampled = np.ravel(v_sampled)
         
         plt.subplot(2, 1, 1)
         order = np.abs(v_true).argsort()
@@ -861,7 +862,7 @@ class Sampler:
         g_true = self.select_values_by_time_freq(self.vis_true.get_antenna_gains(), time, freq)
         g_redcal = self.select_values_by_time_freq(self.vis_redcal.get_antenna_gains(), time, freq)
         g_sampled = self.bests("g", time=time, freq=freq, method=self.best_type, measure=self.best_measure)["g"]
-
+        
         g_true = np.ravel(g_true)
         g_redcal = np.ravel(g_redcal)
         g_sampled = np.ravel(g_sampled)
@@ -880,7 +881,6 @@ class Sampler:
         plt.plot(range(g_true.size), np.abs(g_sampled), "b", linewidth=0.6, label="g_sampled")
         
         # Error bars
-
         assert error_amp.shape[0] == g_true.size, str(error_amp.shape[0])+" "+str(g_true.size)
         for i in range(error_amp.shape[0]):
             plt.plot([i, i], [ error_amp[i][0], error_amp[i][1] ], "lightblue")
@@ -894,13 +894,13 @@ class Sampler:
         plt.subplot(2, 1, 2)
 
         # 1. V true. The gains are 1? Can't remember why
-        plt.plot(range(g_true.size), np.unwrap(np.angle(g_true)), color="green", linewidth=0.6, label="g_true")
+        plt.plot(range(g_true.size), np.angle(g_true), color="green", linewidth=0.6, label="g_true")
 
         # 2. The redcal gains as they are given to us by redcal.
-        plt.plot(range(g_true.size), np.unwrap(np.angle(g_redcal.astype(np.complex64))), "r", linewidth=0.6, label="g_redcal")
+        plt.plot(range(g_true.size), np.angle(g_redcal.astype(np.complex64)), "r", linewidth=0.6, label="g_redcal")
 
         # 3. The sampled gains, actually x is sampled. 
-        plt.plot(range(g_true.size), np.unwrap(np.angle(g_sampled.astype(np.complex64))), "b", linewidth=0.6, label="g_sampled")
+        plt.plot(range(g_true.size), np.angle(g_sampled.astype(np.complex64)), "b", linewidth=0.6, label="g_sampled")
         
         # Error bars
         assert error_phase.shape[0] == g_true.size
@@ -1644,9 +1644,9 @@ class Sampler:
             raise ValueError("Invalid method")
 
         return best_dict
-    
-    
-    def fix_degeneracies(self):
+
+
+    def fix_redcal_degeneracies(self):
         """
         Use the true (input) gains to fix the degeneracy directions in a set of 
         redundantly-calibrated gain solutions. This replaces the absolute 
@@ -1681,13 +1681,11 @@ class Sampler:
             Dictionary with the same items as red_gains, but where the degeneracies 
             have been fixed in the gain solutions.
 
-        uvc : UVCal, optional
+        uself.vis_redcal.: UVCal, optional
             If outfile is specified, also returns a UVCal object containing the 
             updated gain solutions.
         """
-        try: hera_cal.__version__
-        except: import hera_cal as hc
-            
+
         def un_key(gains):
             stripped = np.empty((gains[(0, "Jee")].shape[0], gains[(0, "Jee")].shape[1], len(gains.keys())), 
                                 dtype=type(gains[(0, "Jee")][0, 0]))
@@ -1695,26 +1693,23 @@ class Sampler:
                 ant = key[0]
                 stripped[:, : ,ant] = gains[key]
             return stripped
-        
-        def fix(cal, gains, gains_dict):
-                # Fix degeneracies on "gains"
 
-            for i in range(self.vis_redcal.nant):
-                gains_dict[(i, "Jee")] = gains[:, :, i]
-                
-            new_gains = RedCal.remove_degen_gains(gains_dict,             # Dict containing 2D array of complex gain solutions for each antenna 
-                                              degen_gains=true_gains, 
-                                              mode='complex')
-            return un_key(new_gains)
-        
-        assert len(self.file_root) > 0, "This is not a non-redundant sim. Can't fix degeneracies."
+
+        def rephase(a, b):
+                # rephase a so it has the same phase as b
+                return a*np.exp((np.angle(b)-np.angle(a))*1j)
+
+        def rephase_dict(a, b):
+            new_dict = {}
+            for key in a:
+                new_dict[key] = rephase(a[key], b[key])
+
+            return new_dict
 
         print("Fixing degeneracies")
-        
-        if self.gain_degeneracies_fixed:
-            print("Degeneracies already fixed. Nothing to do.")
-            return
-        
+
+
+
         # Need the redundant groups in the right format, antenna pairs and ee pol
         # Redundancy might have been removed but that's ok because each bl in a group still.
         reds = []
@@ -1726,65 +1721,80 @@ class Sampler:
                 new_rg.append(ants)
             reds.append(new_rg)
 
-        """
-        # This is what would do if using g_omnical
-        # Need g_omnical
-        fname = self.file_root+"_g_cal_dict.npz"
-        red_gains = hkl.load(fname)["g_omnical"]
-        # Keys are like (0, 'Jee'). For each key is an array (ntimes, nfreqs)
-        # Have to select out the time freq of this object.
-        assert len(red_gains.keys()) == self.nant
-        for key in red_gains:
-            red_gains[key] = red_gains[key][self.time:self.time+1, self.freq:self.freq+1]
-        """
-        
-        time_range = self.time_range
-        if time_range is None:
-            time_range = ( 0, self.vis_redcal.ntime )
-        freq_range = self.freq_range
-        if freq_range is None:
-            freq_range = ( 0, self.vis_redcal.nfreq )
-
-           
-        true_gains, _ = hc.io.load_cal(self.vis_redcal.file_root+"_g_new.calfits")
-        # Same layout as red_gains
-        assert len(true_gains.keys()) == self.vis_redcal.nant
-        for key in true_gains:
-            true_gains[key] = true_gains[key][time_range[0]:time_range[1], freq_range[0]:freq_range[1]]
-        
         # Create calibrator and dict for the work
         RedCal = hc.redcal.RedundantCalibrator(reds)
-        gains_dict = {}             # this is just used for temp space
-        
-        # We want to find x_new so that fix(g_bar(1+x)) = fix(g_bar)(1+x_new)
-        #   x_new = fix(g_bar(1+x))/fix(g_bar) - 1
-        
-        # Fix all the samples
-        
-        fixed_g_bar = fix(RedCal, self.vis_redcal.g_bar.astype(np.complex128), gains_dict)
-        
-        if self.samples is not None:
-            # Now fix the sampled gains and adjust the x values
-            for i in range(self.samples["g"].shape[0]):
 
-                self.samples["g"][i] = fix(RedCal, self.samples["g"][i], gains_dict)     # fix(g_bar(1+x))
+        # Save the ggV out of redcal
+        ggV = self.vis_redcal.get_simulated_visibilities()
 
-                # Recalculate x
-                self.samples["x"][i] = self.samples["g"][i]/fixed_g_bar - 1
-  
-        # Fix redcal gains
-        fix_g_bar_1_plus_x = fix(RedCal, self.vis_redcal.get_antenna_gains().astype(np.complex128), gains_dict)
-        self.vis_redcal.x = fix_g_bar_1_plus_x/fixed_g_bar - 1  # Update x
-        self.vis_redcal.g_bar = fixed_g_bar
+        g_bar = rephase(self.vis_redcal.g_bar.astype(np.complex128), self.vis_true.g_bar.astype(np.complex128))
 
-        if self.samples is not None:
-            # Fix the x best sample
-            fix_g_bar_1_plus_x = fix(RedCal, self.vis_sampled.get_antenna_gains().astype(np.complex128), gains_dict)
-            self.vis_sampled.x = fix_g_bar_1_plus_x/fixed_g_bar - 1  # Update x
-            self.vis_sampled.g_bar = fixed_g_bar
+        solution = {}
+        for i in range(self.vis_redcal.nant):
+            solution[(i, 'Jee')] = g_bar[:, :, i]
 
-        self.gain_degeneracies_fixed = True
-    
+        V = self.vis_redcal.project_model()
+        for i in range(self.vis_redcal.nvis):
+            ant1 = self.vis_redcal.bl_to_ants[i][0]
+            ant2 = self.vis_redcal.bl_to_ants[i][1]
+            solution[(ant1, ant2, "ee")] = V[:, :, i]
+
+        true_gains = {} 
+        for i in range(self.vis_true.nant):
+            true_gains[(i, 'Jee')] = self.vis_true.g_bar[:, :, i]
+
+
+        new_sol = RedCal.remove_degen(solution, degen_sol=true_gains)
+
+        # See if remove_degen preserved redundancy
+        # Unpack V
+        V = np.empty((self.vis_redcal.V_model.shape[0], self.vis_redcal.V_model.shape[1], self.vis_redcal.nvis), dtype=type(self.vis_redcal.V_model[0, 0, 0]))
+        for i, key in enumerate(new_sol):
+            if len(key) == 3:   # baseline
+                bl = self.vis_redcal.bl_to_ants.index((key[0], key[1]))
+                V[:, :, bl] = new_sol[key]               
+
+        for bls in self.vis_redcal.redundant_groups:
+            for bl in bls[1:]:
+                assert np.allclose(V[:, :, bl], V[:, :, bls[0]]), "Redundancy not preserved by remove_degen"
+
+
+        # Unpack g  
+        for i, key in enumerate(new_sol):
+            if len(key) == 2:   # ant
+                ant = key[0]
+                g_bar[:, : ,ant] = new_sol[key]           # Reusing g_bar
+
+        # Now we want to rephase V so that ggV_phase = new_gg_phase+phase(rephased(V)).
+        # Or: the new phase of V is the phase of ggV/new_gg. Need to construct new_gg.
+        new_gg = np.zeros_like(ggV)
+        for t in range(g_bar.shape[0]):
+            for f in range(g_bar.shape[1]):
+                k = 0
+                for i in range(g_bar.shape[2]):
+                    for j in range(i+1, g_bar.shape[2]):
+                        new_gg[t, f, k] = g_bar[t, f, i]*np.conj(g_bar[t, f, j])
+                        k += 1
+
+
+        V = rephase(V, ggV/new_gg)
+
+
+        # See if redundancy has been preserved, model should be the same in each group. the amp is easy but the phase isn't due to wrapping.
+        # 
+        for bls in self.vis_redcal.redundant_groups:
+            for bl in bls[1:]:
+                assert np.abs(np.max(V[:, :, bl]-V[:, :, bls[0]])) < 1
+
+
+        # Ok, insert the model
+        for t in range(g_bar.shape[0]):
+            for f in range(g_bar.shape[1]):
+                for i in range(self.vis_redcal.V_model.shape[2]):
+                    self.vis_redcal.V_model[t, f, i] = np.mean(V[t, f, self.vis_redcal.redundant_groups[i]])
+
+        # Inset g_bar
+        self.vis_redcal.g_bar = g_bar
 
 
 if __name__ == "__main__":
@@ -1793,12 +1803,84 @@ if __name__ == "__main__":
     import matplotlib.pyplot as plt
     import os, time, hickle, cProfile
     
-    file_root = "/data/scratch/apw737/catall_nobright/viscatBC"
-    sampler = Sampler(seed=99, niter=100, burn_in=10, best_type="mean", random_the_long_way=True, use_conj_grad=True, report_every=1000)
-    sampler.load_nr_sim(file_root, remove_redundancy=False) 
+    sampler = load_from_files("/data/scratch/apw737/catall_nobright/sampled_viscatBC")
+    sampler.fix_redcal_degeneracies()
+    exit()
     
-    print(np.mean(sampler.vis_redcal.chi2["Jee"]))
-    print(sampler.vis_redcal.get_chi2(over_all=True))
+    plt.subplot(2, 1, 1)
+    plt.plot(np.ravel(np.abs(vc.V_obs))[:limit_to], label="abs(d)")
+    plt.plot(np.abs(np.ravel(vc.get_simulated_visibilities()))[:limit_to], label="abs(s)")     # get_simulated visibilities does gg*V 
+    plt.xlabel("Order")
+    plt.ylabel("V")
+    plt.legend()
+    plt.title("redcal abs(d), abs(s) limited to the first few values")
+
+    plt.subplot(2, 1, 2)
+    plt.plot(np.ravel(np.angle(vc.V_obs))[:limit_to], label="phase(d)")
+    plt.plot(np.angle(np.ravel(vc.get_simulated_visibilities()))[:limit_to], label="phase(s)")     # get_simulated visibilities does gg*V 
+    plt.xlabel("Order")
+    plt.ylabel("V")
+    plt.legend()
+    plt.title("redcal phase(d), phase(s) limited to the first few values")
+    
+    plt.subplot(2, 1, 1)
+    plt.plot(np.ravel(np.abs(vt.V_model))[:limit_to], label="abs(d)")
+    plt.plot(np.abs(np.ravel(vc.get_calibrated_visibilities()))[:limit_to], label="abs(s)")     # get_simulated visibilities does gg*V 
+    plt.xlabel("Order")
+    plt.ylabel("V")
+    plt.legend()
+    plt.title("redcal abs(true V), abs(cal V) limited to the first few values")
+
+    plt.subplot(2, 1, 2)
+    plt.plot(np.ravel(np.angle(vt.V_model))[:limit_to], label="phase(d)")
+    plt.plot(np.angle(np.ravel(vc.get_calibrated_visibilities()))[:limit_to], label="phase(s)")     # get_simulated visibilities does gg*V 
+    plt.xlabel("Order")
+    plt.ylabel("V")
+    plt.legend()
+    plt.title("redcal phase(true V), phase(cal V) limited to the first few values")
+
+
+    
+    """
+    np.seterr(all="raise")
+    file_root = "/data/scratch/apw737/catall_nobright/viscatBC"
+    sampler = load_from_files("/data/scratch/apw737/catall_nobright/sampled_viscatBC")
+    plt.matshow(np.abs(sampler.vis_redcal.g_bar[:, :, 3].astype(np.complex128)))
+    plt.title("before fix, amplitude")
+    plt.colorbar()
+    plt.savefig("before_amp")
+    plt.clf()
+    plt.matshow(np.angle(sampler.vis_redcal.g_bar[:, :, 3].astype(np.complex128)))
+    plt.title("before fix, phase")
+    plt.colorbar()
+    plt.savefig("before_phase")
+    plt.clf()
+    sampler.fix_degeneracies()
+    print("X")
+    plt.matshow(np.abs(sampler.vis_redcal.g_bar[:, :, 3].astype(np.complex128)))
+    plt.title("after fix, amplitude")
+    plt.colorbar()
+    plt.savefig("after_amp")
+    plt.clf()
+    plt.matshow(np.angle(sampler.vis_redcal.g_bar[:, :, 3].astype(np.complex128)))
+    plt.title("after fix, phase")
+    plt.colorbar()
+    plt.savefig("after_phase")
+    plt.clf()
+
+    sampler.plot_gains(time=0, freq=0)
+    exit()
+    """
+    
+
+    sampler = load_from_files("/data/scratch/apw737/catall_nobright/sampled_viscatBC_stretch0.01")
+    print(np.abs(sampler.vis_redcal.g_bar[1, 1, :].astype(np.complex128)))
+    print(np.angle(sampler.vis_redcal.g_bar[1, 1, :].astype(np.complex128)))
+    #print(sampler.vis_sampled.get_chi2(over_all=True), sampler.vis_sampled.get_unnormalized_likelihood(over_all=True, unity_N=False, exp=False))
+    sampler.fix_degeneracies2()
+    print(np.abs(sampler.vis_redcal.g_bar[1, 1, :].astype(np.complex128)))
+    print(np.angle(sampler.vis_redcal.g_bar[1, 1, :].astype(np.complex128)))
+    #print(sampler.vis_sampled.get_chi2(over_all=True), sampler.vis_sampled.get_unnormalized_likelihood(over_all=True, unity_N=False, exp=False))
     exit()
     #sampler.load_sim(20, 40, 40)
 

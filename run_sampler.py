@@ -16,8 +16,11 @@ sampler = Sampler(seed=99, niter=cfg["niter"], burn_in=10, best_type=cfg["best_t
                   best_measure=cfg["best_measure"], random_the_long_way=True, use_conj_grad=True, 
                   report_every=cfg["report_every"])
 sampler.load_nr_sim(cfg["file_root"], with_redcal=cfg["with_redcal"], remove_redundancy=cfg["remove_redundancy"])   
-print("redal chi2", sampler.vis_redcal.get_chi2(over_all=True))
-
+print("Expected chi2", np.mean(sampler.vis_redcal.chi2["Jee"][0]), "redal chi2", sampler.vis_redcal.get_chi2(over_all=True))
+if cfg["fix_degeneracies"]: sampler.fix_redcal_degeneracies()
+  
+print("chi2 after degeneracy fix", np.mean(sampler.vis_redcal.chi2["Jee"][0]))
+    
 # Fourier mode setup for S
 if cfg["modes"]["pattern"] == "flat":
     pattern = lambda x, y: 1 
@@ -39,14 +42,13 @@ Cv_diag = np.full(V_mean.shape[2]*2, cfg["priors"]["Cv"])
 
 sampler.set_S_and_V_prior(sm, V_mean, Cv_diag)
 
-if cfg["fix_degeneracies"] == "before": sampler.fix_degeneracies()
+
 
 start = time.time()
 #cProfile.run("sampler.run()", filename="sampler.prof", sort="cumulative")
 
 sampler.run()
 
-if cfg["fix_degeneracies"] == "after": sampler.fix_degeneracies()
     
 print("Run time:", time.time()-start)
 
