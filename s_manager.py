@@ -26,7 +26,8 @@ class SManager:
         assert 0 <= ignore_threshold and ignore_threshold < 1, "ignore_threshold must be in [0, 1)"
         assert modes is None or (isinstance(modes, int) and modes > 0), "modes must be a positive integer"
         assert (isinstance(scale, float) or isinstance(scale, int)) and scale > 0, "scale must be a positive number"
-        assert isinstance(zoom_from, tuple) and (isinstance(zoom_from[0], int) and zoom_from[0] > 0) and \
+        if isinstance(zoom_from, list) and len(zoom_from) == 2: zoom_from = ( zoom_from[0], zoom_from[1] )
+        assert isinstance(zoom_from, tuple) and len(zoom_from)== 2 and (isinstance(zoom_from[0], int) and zoom_from[0] > 0) and \
                 (isinstance(zoom_from[1], int) and zoom_from[1] > 0), "zoom_from must be a pair of positive integers"
             
         x = np.arange(-1, 1, 2.0/self.ntime)    # ntime values from [-1, 1)
@@ -58,7 +59,8 @@ class SManager:
         for i in range(i_start, i_end, 1):
             for j in range(j_start, j_end, 1):
                 data[i][j] = func(x[i], y[j])*scale
-
+                
+        self.gain_smooth_modes = (i_start, i_end, j_start, j_end)
             
         assert np.min(data) >= 0, "S cannot contain negative values"
        

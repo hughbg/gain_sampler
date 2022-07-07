@@ -5,21 +5,31 @@ import os, time, hickle, cProfile
 import numpy as np
 import sys, yaml
 
+def all_chi2(vis):
+    print(cfg["file_root"]+":", "Expected chi2", np.mean(vis.chi2["Jee"][0]))
+    if vis.is_redundant: print(cfg["file_root"]+":", "calculated chi2 by redcal", vis.get_chi2(over_all=True))
+    for dof in [ "default", "as_if_redundant", "as_if_non_redundant", "use_nvis" ]:
+        for use_noise in [ True, False ]:
+            print(cfg["file_root"]+":", "calculated chi2 by equation, dof", dof, "use_noise", use_noise, vis.get_chi2_eqn(dof=dof, use_noise=use_noise))
+
+
 np.seterr(invalid='raise')
 
 with open(sys.argv[1]) as f:
     cfg = yaml.load(f, Loader=yaml.FullLoader)
 
-
-
 sampler = Sampler(seed=99, niter=cfg["niter"], burn_in=10, best_type=cfg["best_type"], best_use=cfg["best_use"],
                   best_measure=cfg["best_measure"], random_the_long_way=True, use_conj_grad=True, 
                   report_every=cfg["report_every"])
-sampler.load_nr_sim(cfg["file_root"], with_redcal=cfg["with_redcal"], remove_redundancy=cfg["remove_redundancy"])   
-print("Expected chi2", np.mean(sampler.vis_redcal.chi2["Jee"][0]), "redal chi2", sampler.vis_redcal.get_chi2(over_all=True))
+sampler.load_nr_sim(cfg["file_root"], with_redcal=cfg["with_redcal"])  
+
+all_chi2(sampler.vis_redcal)
+
 if cfg["fix_degeneracies"]: sampler.fix_redcal_degeneracies()
-  
-print("chi2 after degeneracy fix", np.mean(sampler.vis_redcal.chi2["Jee"][0]))
+    
+all_chi2(sampler.vis_redcal)
+    
+if cfg["remove_redundancy"]: sampler.vis_redcal.remove_redundancy()
     
 # Fourier mode setup for S
 if cfg["modes"]["pattern"] == "flat":
@@ -42,14 +52,16 @@ Cv_diag = np.full(V_mean.shape[2]*2, cfg["priors"]["Cv"])
 
 sampler.set_S_and_V_prior(sm, V_mean, Cv_diag)
 
-
+if cfg["smooth_gains"]: sampler.gain_smooth_modes = sm.gain_smooth_modes
 
 start = time.time()
 #cProfile.run("sampler.run()", filename="sampler.prof", sort="cumulative")
 
 sampler.run()
 
-    
+print(sampler.vis_sampled.get_rms())
+
+all_chi2(sampler.vis_sampled)
 print("Run time:", time.time()-start)
 
 case = os.path.basename(cfg["orig_yaml"][:-5]).split("_")[1:]

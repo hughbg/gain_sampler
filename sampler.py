@@ -31,8 +31,6 @@ def load_from_files(dirname):
     
     return sampler
 
-
-
         
 class Sampler:
     
@@ -62,7 +60,7 @@ class Sampler:
     """
     
     def __init__(self, niter=1000, burn_in=10, seed=None, random_the_long_way=False, use_conj_grad=True, 
-                best_type="mean", best_use="x", best_measure="rms", report_every=1000):
+                best_type="mean", best_use="x", best_measure="rms", gain_smooth_modes=None, report_every=1000):
 
 
         if seed is not None:
@@ -95,8 +93,10 @@ class Sampler:
         self.gain_degeneracies_fixed = False
         
         self.samples = None
+        
+        self.gain_smooth_modes = gain_smooth_modes
     
-    def load_nr_sim(self, file_root, time_range=None, freq_range=None, remove_redundancy=False, 
+    def load_nr_sim(self, file_root, time_range=None, freq_range=None, 
                     with_redcal=True, initial_solve_for_x=False):
         """
         Load a simulation from the Non-Redundant pipeline.
@@ -129,14 +129,12 @@ class Sampler:
         print("Loading NR sim from", file_root)
         self.vis_true = VisTrue(file_root, time_range=time_range, freq_range=freq_range)
         if with_redcal:
-            self.vis_redcal = VisCal(file_root, time_range=time_range, freq_range=freq_range, 
-                                     remove_redundancy=remove_redundancy) 
+            self.vis_redcal = VisCal(file_root, time_range=time_range, freq_range=freq_range) 
         else:
             self.vis_redcal = self.vis_true
 
         if initial_solve_for_x:
             self.vis_redcal.x = self.vis_redcal.initial_vals.x = gls_solve(self.vis_redcal)
-            
             
         # Indexes into the original simulated data
         self.time_range = time_range
@@ -201,9 +199,14 @@ class Sampler:
             v_x_sampling.s_flat = v_x_sampling.s_flat[self.S.usable_modes]
         except:
             raise RuntimeError("S prior is of wrong size")
+            
+            
+        if self.gain_smooth_modes is not None:
+            v_x_sampling.g_bar = self.vis_redcal.smooth_gains(self.gain_smooth_modes)
 
 
         v_model_sampling = VisSampling(self.vis_redcal) 
+        v_model_sampling.g_bar = v_x_sampling.g_bar       # Might be smoothed
 
         new_x = v_model_sampling.x         # Initialize
         
@@ -240,7 +243,7 @@ class Sampler:
                 print("Iter", i)
                 resources.report()
 
-            sys.stdout.flush()
+                sys.stdout.flush()
             
             
         sampled_x = sampled_x[(self.niter*self.burn_in)//100:]
@@ -272,6 +275,7 @@ class Sampler:
         # Create an object containing the best fit
         # Create an object containing the best fit
         self.vis_sampled = copy.deepcopy(self.vis_redcal)    
+        self.vis_sampled.g_bar = v_x_sampling.g_bar           # Might have been smoothed
         best_vals = self.bests(self.best_use, method=self.best_type, measure=self.best_measure)
         if self.best_use == "x":
             self.vis_sampled.x = best_vals["x"]
@@ -769,15 +773,21 @@ class Sampler:
                           "{:12f}".format(np.mean(samples[:, t, f, i])), 
                            "{:12f}".format(np.var(samples[:, t, f, i])),  "{:12f}".format(np.std(samples[:, t, f, i])))
   
-    def plot_results(self, time=None, freq=None): 
+    def plot_results(self, time=None, freq=None, plot_to=None): 
         
         def print_fit_stats(name, x, y):
+            # Fit to a line
             new_series, info = np.polynomial.polynomial.polyfit(x, y, 1, full=True)
             print(name, "Slope:", new_series[-1], "Error:", info[0][0])
 
-   
-        #self.fix_degeneracies()
-        print("Plot results")
+        rms = lambda x, y: np.sqrt(np.mean((x-y)**2))
+        
+        print("WARNING: These plots are made by ordering the V-true value from small to big. and using that same order for v_true/v_sampled.")
+        print("WARNING: The purpose is that gives a nice line of slope 1 if everything worked well.")
+        print("WARNING: However it completely changes the order of the values, they are not ordered by time or freq or antenna but are jumbled.")
+
+        print("Plot results calibrated visibilities")
+        print("------------------------------------")
         
         v_true = self.select_values_by_time_freq(self.vis_true.V_model, time, freq)
         v_redcal = self.select_values_by_time_freq(self.vis_redcal.get_calibrated_visibilities(), time, freq)
@@ -787,7 +797,8 @@ class Sampler:
         v_redcal = np.ravel(v_redcal)
         v_sampled = np.ravel(v_sampled)
         
-        plt.subplot(2, 1, 1)
+        # Amp 1:1
+        plt.subplot(8, 1, 1)
         order = np.abs(v_true).argsort()
         plt.plot(np.abs(v_true[order]), 
                  np.abs(v_true[order]), "k", linewidth=0.6,  label="1:1")
@@ -802,7 +813,8 @@ class Sampler:
         plt.ylabel("Amplitude")
         plt.title("Calibrated visibilities (Amplitude)")
         
-        plt.subplot(2, 1, 2)
+        # Phase 1:1
+        plt.subplot(8, 1, 2)
         order = np.angle(v_true).argsort()
         plt.plot(np.angle(v_true.astype(np.complex64)[order]), 
                  np.angle(v_true.astype(np.complex64)[order]), "k", linewidth=0.6,  label="1:1")
@@ -817,6 +829,116 @@ class Sampler:
         plt.ylabel("Phase")
         plt.title("Calibrated visibilities (Phase)")
         plt.tight_layout()
+        
+        # Amp diff
+        plt.subplot(8, 1, 3)
+        order = np.abs(v_true).argsort()
+        plt.plot(np.abs(v_true[order]), 
+                 np.abs(v_redcal[order])-np.abs(v_true[order]), "r", linewidth=0.6,  label="Redcal")
+        plt.plot(np.abs(v_true[order]), 
+                 np.abs(v_sampled[order])-np.abs(v_true[order]), "b", linewidth=0.6,  label="Sampled")
+        plt.legend()
+        plt.xlabel("V_true amplitude")
+        plt.ylabel("Amplitude Diff")
+        plt.title("Calibrated visibilities difference (Amplitude)")
+        
+        # Phase diff
+        plt.subplot(8, 1, 4)
+        order = np.angle(v_true).argsort()
+        plt.plot(np.angle(v_true.astype(np.complex64)[order]), 
+                 np.angle(v_redcal.astype(np.complex64)[order]-np.angle(v_true.astype(np.complex64)[order])), "r", linewidth=0.6,  label="Redcal")
+        plt.plot(np.angle(v_true.astype(np.complex64)[order]), 
+                 np.angle(v_sampled.astype(np.complex64)[order]-np.angle(v_true.astype(np.complex64)[order])), "b", linewidth=0.6,  label="Sampled")
+        plt.legend()
+        plt.xlabel("V_true phase")
+        plt.ylabel("Phase Diff")
+        plt.title("Calibrated visibilities difference (Phase)")
+        plt.tight_layout()
+        
+        print("CAL rms true diff redcal amp", rms(np.abs(v_true[order]), np.abs(v_redcal[order])))
+        print("CAL rms true diff sampled amp", rms(np.abs(v_true[order]), np.abs(v_sampled[order])))
+        print("CAL rms true diff redcal phase", rms(np.angle(v_true[order]), np.angle(v_redcal[order])))
+        print("CAL rms true diff sampled phase", rms(np.angle(v_true[order]), np.angle(v_sampled[order])))
+        print()
+        
+        print("Plot results observed visibilities")
+        print("------------------------------------")
+        
+        v_true = self.select_values_by_time_freq(self.vis_true.V_obs, time, freq)
+        v_redcal = self.select_values_by_time_freq(self.vis_redcal.get_simulated_visibilities(), time, freq)
+        v_sampled = self.select_values_by_time_freq(self.vis_sampled.get_simulated_visibilities(), time, freq)
+
+        v_true = np.ravel(v_true)
+        v_redcal = np.ravel(v_redcal)
+        v_sampled = np.ravel(v_sampled)
+        
+        # Amp 1:1
+        plt.subplot(8, 1, 5)
+        order = np.abs(v_true).argsort()
+        plt.plot(np.abs(v_true[order]), 
+                 np.abs(v_true[order]), "k", linewidth=0.6,  label="1:1")
+        plt.plot(np.abs(v_true[order]), 
+                 np.abs(v_redcal[order]), "r", linewidth=0.6,  label="Redcal")
+        print_fit_stats("Redcal Amp", np.abs(v_true[order]), np.abs(v_redcal[order]))
+        plt.plot(np.abs(v_true[order]), 
+                 np.abs(v_sampled[order]), "b", linewidth=0.6,  label="Sampled")
+        print_fit_stats("Sampled Amp", np.abs(v_true[order]), np.abs(v_sampled[order]))
+        plt.legend()
+        plt.xlabel("V_true amplitude")
+        plt.ylabel("Amplitude")
+        plt.title("Observed visibilities (Amplitude)")
+        
+        # Phase 1:1
+        plt.subplot(8, 1, 6)
+        order = np.angle(v_true).argsort()
+        plt.plot(np.angle(v_true.astype(np.complex64)[order]), 
+                 np.angle(v_true.astype(np.complex64)[order]), "k", linewidth=0.6,  label="1:1")
+        plt.plot(np.angle(v_true.astype(np.complex64)[order]), 
+                 np.angle(v_redcal.astype(np.complex64)[order]), "r", linewidth=0.6,  label="Redcal")
+        print_fit_stats("Redcal Phase", np.angle(v_true[order]), np.angle(v_redcal[order]))
+        plt.plot(np.angle(v_true.astype(np.complex64)[order]), 
+                 np.angle(v_sampled.astype(np.complex64)[order]), "b", linewidth=0.6,  label="Sampled")
+        print_fit_stats("Sampled Phase", np.angle(v_true[order]), np.angle(v_sampled[order]))
+        plt.legend()
+        plt.xlabel("V_true phase")
+        plt.ylabel("Phase")
+        plt.title("Observed visibilities (Phase)")
+        plt.tight_layout()
+        
+        # Amp diff
+        plt.subplot(8, 1, 7)
+        order = np.abs(v_true).argsort()
+        plt.plot(np.abs(v_true[order]), 
+                 np.abs(v_redcal[order])-np.abs(v_true[order]), "r", linewidth=0.6,  label="Redcal")
+        plt.plot(np.abs(v_true[order]), 
+                 np.abs(v_sampled[order])-np.abs(v_true[order]), "b", linewidth=0.6,  label="Sampled")
+        plt.legend()
+        plt.xlabel("V_true amplitude")
+        plt.ylabel("Amplitude Diff")
+        plt.title("Observed visibilities difference (Amplitude)")
+        
+        # Phase diff
+        plt.subplot(8, 1, 8)
+        order = np.angle(v_true).argsort()
+        plt.plot(np.angle(v_true.astype(np.complex64)[order]), 
+                 np.angle(v_redcal.astype(np.complex64)[order]-np.angle(v_true.astype(np.complex64)[order])), "r", linewidth=0.6,  label="Redcal")
+        plt.plot(np.angle(v_true.astype(np.complex64)[order]), 
+                 np.angle(v_sampled.astype(np.complex64)[order]-np.angle(v_true.astype(np.complex64)[order])), "b", linewidth=0.6,  label="Sampled")
+        plt.legend()
+        plt.xlabel("V_diff phase")
+        plt.ylabel("Phase Diff")
+        plt.title("Observed visibilities difference (Phase)")
+        plt.tight_layout()
+
+        
+        
+        print("OBS rms true diff redcal amp", rms(np.abs(v_true[order]), np.abs(v_redcal[order])))
+        print("OBS rms true diff sampled amp", rms(np.abs(v_true[order]), np.abs(v_sampled[order])))
+        print("OBS rms true diff redcal phase", rms(np.angle(v_true[order]), np.angle(v_redcal[order])))
+        print("OBS rms true diff sampled phase", rms(np.angle(v_true[order]), np.angle(v_sampled[order])))
+        
+        if plot_to is not None:
+            plt.savefig(plot_to)  
         
     def plot_gains(self, time=None, freq=None, sigma=3, plot_to=None):
         def normalize_phases(phases):
@@ -1784,7 +1906,7 @@ class Sampler:
         # 
         for bls in self.vis_redcal.redundant_groups:
             for bl in bls[1:]:
-                assert np.abs(np.max(V[:, :, bl]-V[:, :, bls[0]])) < 1
+                assert np.abs(np.max(V[:, :, bl]-V[:, :, bls[0]])) < 1.2, "Redundancy not preserved by phase shift. Non redundancy: "+str(np.abs(np.max(V[:, :, bl]-V[:, :, bls[0]])))
 
 
         # Ok, insert the model
@@ -1803,8 +1925,9 @@ if __name__ == "__main__":
     import matplotlib.pyplot as plt
     import os, time, hickle, cProfile
     
-    sampler = load_from_files("/data/scratch/apw737/catall_nobright/sampled_viscatBC")
-    sampler.fix_redcal_degeneracies()
+    plt.rcParams['figure.figsize'] = [20, 20]
+    sampler = load_from_files("/data/scratch/apw737/catall_nobright/sampled_viscatBC_stretch0.01")
+    sampler.plot_results(plot_to="r")
     exit()
     
     plt.subplot(2, 1, 1)

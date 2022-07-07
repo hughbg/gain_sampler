@@ -414,6 +414,7 @@ class VisSim:
                            
         
     def remove_redundancy(self):
+        print("Removing redundancy")
         bm = BlockMatrix()
         bm.add(self.model_projection, replicate=self.ntime*self.nfreq)
         redundant_projector = bm.assemble()   # Non square matrix of shape nvis*2*ntime*nfreq x nredundant_vis*2*nreq*ntime
@@ -427,7 +428,8 @@ class VisSim:
         self.redundant_groups = [ [i] for i in range(self.nvis) ]
         self.model_projection = self.get_model_projection()
         
-        return V
+    def is_redundant(self):
+        return len(self.redundant_groups) != self.nvis
 
     def fold_x_into_gains():
         self.g_bar *= (1+self.x)
@@ -455,6 +457,30 @@ class VisSim:
     def get_rms(self):
         diff = split_re_im(self.project_model())-split_re_im(self.get_calibrated_visibilities())
         return np.sqrt(np.mean((diff**2)))
+    
+    def get_chi2_eqn(self, dof="default", use_noise=False):
+        print("chi2", "dof", dof, "use_noise")
+        if use_noise:
+            noise_std = np.sqrt(self.obs_variance.real)+np.sqrt(self.obs_variance.imag)*1j
+            weights = 1/np.abs(noise_std)**2
+        else:
+            weights = self.weights
+            
+        if dof == "default":
+            if self.is_redundant():
+                dof = self.V_obs.size-self.V_model.size-self.g_bar.size+2
+            else:
+                dof = self.V_obs.size-self.g_bar.size+2
+        elif dof == "as_if_redundant":
+            dof = self.V_obs.size-self.V_model.size-self.g_bar.size+2
+        elif dof == "as_if_non_redundant":
+            dof = self.V_obs.size-self.g_bar.size+2
+        elif dof == "use_nvis":
+            dof = self.V_obs.size+2
+
+        chi2 = np.sum(np.abs(self.V_obs-self.get_simulated_visibilities())**2*weights)
+            
+        return chi2/dof
 
     def get_chi2(self, over_all=False):
         """
@@ -467,11 +493,13 @@ class VisSim:
         data = {}
         for i in range(self.V_obs.shape[2]):
             data[(self.bl_to_ants[i][0], self.bl_to_ants[i][1], 'ee')] = self.V_obs[:, :, i]
+
      
         vis_sols = {}
         for i, group in enumerate(self.redundant_groups):
             vis_sols[(self.bl_to_ants[group[0]][0], self.bl_to_ants[group[0]][1], 'ee')] = self.V_model[:, :, i]
-          
+
+
         """
         keys = sorted(vis_sol)
         for k in keys:
@@ -483,8 +511,9 @@ class VisSim:
         gains = {}
         antenna_gains = self.get_antenna_gains()
         for i in range(self.g_bar.shape[2]):
-            gains[(i, 'Jee')] = antenna_gains[:, :, i]        
+            gains[(i, 'Jee')] = antenna_gains[:, :, i]   
             
+           
         weights = {}
         
         if self.weights is not None:
@@ -492,8 +521,9 @@ class VisSim:
                 weights[(self.bl_to_ants[i][0], self.bl_to_ants[i][1], 'ee')] = self.weights[:, :, i]
         elif self.obs_variance is not None:
             for i in range(self.V_obs.shape[2]):
-                weights[(self.bl_to_ants[i][0], self.bl_to_ants[i][1], 'ee')] = np.real(self.obs_variance[:, :, i])
-         
+                obs_variance = np.sqrt(self.obs_variance[:, :, i].real)+np.sqrt(self.obs_variance[:, :, i].imag)*1j
+                weights[(self.bl_to_ants[i][0], self.bl_to_ants[i][1], 'ee')] = 1/np.abs(obs_variance)**2
+
         """
         dof = (self.nvis-len(self.redundant_groups)-self.nant+2)*self.ntime*self.nfreq
         
@@ -513,7 +543,15 @@ class VisSim:
             for j in range(len(reds[i])):
                 ants = self.bl_to_ants[reds[i][j]]
                 reds[i][j] = (ants[0], ants[1], 'ee')
-                                      
+                
+        """
+        print(data[(5, 6, "ee")][8, :])
+        print(vis_sols[(1, 7, "ee")][:, 3])
+        print(gains[(7, "Jee")][:, 6])
+        print(weights[(5, 6, "ee")][8, :])
+        print(reds)
+        """
+        
         # chisq is split into ntime x nfreq
 
         if over_all:
@@ -542,6 +580,28 @@ class VisSim:
         for red in v.redundant_groups:
             for bl in red:
                 print(mapping[bl], bl, v.V_model[bl])
+                
+    def smooth_gains(self, box):
+        print("Smoothing gains")
+        gains = np.copy(self.g_bar)
+        gains = np.moveaxis(self.g_bar, 2, 0)
+
+        mask = np.zeros((gains.shape[1], gains.shape[2]))
+        mask[box[0]:box[1], box[2]:box[3]] = 1
+        mask = np.fft.fftshift(mask)
+
+        for i in range(gains.shape[0]):
+
+            parsevals1 = np.sum(np.abs(gains[i])**2)
+            fft = np.fft.fft2(gains[i])            
+            
+            gains[i] = np.fft.ifft2(fft*mask)
+            parsevals2 = np.sum(np.abs(gains[i])**2)
+            
+            gains[i] *= np.sqrt(parsevals1/parsevals2)      # Normalize the energy
+          
+        gains = np.moveaxis(gains, 0, 2)
+        return gains
                                 
     def print(self):
         print("V_model", self.V_model)
@@ -613,6 +673,7 @@ class VisCal(VisSim):
         ntime = time_range[1]-time_range[0]
         nfreq = freq_range[1]-freq_range[0]
         
+        # Gte the calibrated visibilities for reference
         fname = file_root+"_g_cal.uvh5"
         uvcal_data = UVData()
         uvcal_data.read_uvh5(fname)
@@ -693,7 +754,6 @@ class VisCal(VisSim):
                 i = bl_to_ants.index((key[1], key[0]))
             weights[:, :, i] = cal["omni_meta"]["data_wgts"][key][time_range[0]:time_range[1], freq_range[0]:freq_range[1]]
         self.weights = weights
-        np.save("weights", self.weights)
         
         # Get the noise
         fname = file_root+"_nn.npz"
@@ -704,29 +764,17 @@ class VisCal(VisSim):
         for i, bl in enumerate(bl_to_ants):
             noise[:, :, i] = uvdata.get_data(bl[0], bl[1], "XX")[time_range[0]:time_range[1], freq_range[0]:freq_range[1]]
         noise = noise.real**2+noise.imag**2*1j       
-        np.save("noise", noise.real)
 
         # Get the gains generated from calibration
         g_bar = np.zeros((ntime, nfreq, nant), dtype=type(V[0]))
-        if degeneracy_fix:
-            fname = file_root+"_g_new.calfits"   # Contain already 
-            print("Get gains from", fname)
-            uvc = UVCal()
-            uvc.read_calfits(fname)
-            for i in range(nant):
-                # The data for each gain is in shape (nfreq, ntime)
-                # Yes it's the other way round to below
-                g_bar[:, :, i] = uvc.get_gains(i).T[time_range[0]:time_range[1], freq_range[0]:freq_range[1]]
-            self.gain_degeneracies_fixed = True
             
-        else:
-            # Get results from cal (g_omnical).
-            assert len(cal["g_omnical"].keys()) == nant
-            for key in cal["g_omnical"]:
-                # Key is of form (0, 'Jee'). The data for each key is in shape (ntime, nfreq)
-                ant = key[0]
-                g_bar[:, :, ant] = cal["g_omnical"][key][time_range[0]:time_range[1], freq_range[0]:freq_range[1]]
-            
+        # Get results from cal (g_omnical).
+        assert len(cal["g_omnical"].keys()) == nant
+        for key in cal["g_omnical"]:
+            # Key is of form (0, 'Jee'). The data for each key is in shape (ntime, nfreq)
+            ant = key[0]
+            g_bar[:, :, ant] = cal["g_omnical"][key][time_range[0]:time_range[1], freq_range[0]:freq_range[1]]
+
         self.file_root = file_root
         self.ntime = ntime
         self.nfreq = nfreq
@@ -801,7 +849,7 @@ class VisTrue(VisSim):
         for i, bl in enumerate(bl_to_ants):
             V_model[:, :, i] = uvdata.get_data(bl[0], bl[1], "XX")[time_range[0]:time_range[1], freq_range[0]:freq_range[1]]
             
-        # Wipe out the redundant groups because the models are not the same in the redundant groups
+        # No redundant groups
         redundant_groups = [ [bl] for bl in range(nvis) ]
 
         # Get true gains
@@ -867,6 +915,7 @@ class VisSampling:
     
     def __init__(self, vis, check_0_im=True, ignore_last_x_im=True):
         
+        # None of these are copied so be careful
         self.level = vis.level
         self.nant = vis.nant
         self.nvis = vis.nvis
@@ -1461,7 +1510,16 @@ def perturb_vis(vis, vis_perturb_percent):
 if __name__ == "__main__":
     
 
-    vc = VisCal("/data/scratch/apw737/catall_nobright/viscatBC_4a_0.02")
+    vc = VisCal("/data/scratch/apw737/catall_nobright/viscatBC")
+    print(np.mean(vc.chi2["Jee"][0]))
+    print(vc.get_chi2(over_all=True))
+    print(vc.get_chi2().shape)
+    exit()
+    box = (6, 11, 6, 11)
+    
 
-    print(vc.get_rms())
+    vc.smooth_gains(box)
+    plt.plot(np.abs(vc.g_bar[:, 6, 4]))
+    plt.plot(np.abs(g_bar))
+    plt.show()
     
