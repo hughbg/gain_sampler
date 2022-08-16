@@ -938,7 +938,143 @@ class Sampler:
         print("OBS rms true diff sampled phase", rms(np.angle(v_true[order]), np.angle(v_sampled[order])))
         
         if plot_to is not None:
-            plt.savefig(plot_to)  
+            plt.savefig(plot_to+".pdf")  
+            
+    def plot_results1(self, param="cal", time=None, freq=None, plot_to=None): 
+        
+        def print_fit_stats(name, x, y):
+            # Fit to a line
+            new_series, info = np.polynomial.polynomial.polyfit(x, y, 1, full=True)
+            print(name, "Slope:", new_series[-1], "Error:", info[0][0])
+
+        rms = lambda x, y: np.sqrt(np.mean((x-y)**2))
+        
+        print("WARNING: These plots are made by ordering the true value from small to big. and using that same order for redcal/sampled.")
+        print("WARNING: The purpose is that gives a nice line of slope 1 if everything worked well.")
+        print("WARNING: However it completely changes the order of the values, they are not ordered by time or freq or antenna but are jumbled.")
+
+        if param == "cal": s = "calibrated visibilities"
+        elif param == "obs": s = "calibrated visibilities"
+        elif param == "g": s = "g"
+        elif param == "V": s = "V"
+        else: 
+            raise ValueError("Unknown parameter")
+            
+        print("Plot "+s)
+        print("-"*len("Plot "+s))
+        
+        if param == "cal":
+            p_true = self.select_values_by_time_freq(self.vis_true.V_model, time, freq)
+            p_redcal = self.select_values_by_time_freq(self.vis_redcal.get_calibrated_visibilities(), time, freq)
+            p_sampled = self.select_values_by_time_freq(self.vis_sampled.get_calibrated_visibilities(), time, freq)
+            xlabel = "V_true"
+            title = "Calibrated observed visibilities"
+            stats_tag = "CAL"
+        elif param == "obs":
+            p_true = self.select_values_by_time_freq(self.vis_true.V_obs, time, freq)
+            p_redcal = self.select_values_by_time_freq(self.vis_redcal.get_simulated_visibilities(), time, freq)
+            p_sampled = self.select_values_by_time_freq(self.vis_sampled.get_simulated_visibilities(), time, freq)
+            xlabel = "d_true"
+            title = "Simulated visibilities from g and V"
+            stats_tag = "OBS"
+        elif param == "g":
+            p_true = self.select_values_by_time_freq(self.vis_true.g_bar, time, freq)
+            p_redcal = self.select_values_by_time_freq(self.vis_redcal.get_antenna_gains(), time, freq)
+            p_sampled = self.select_values_by_time_freq(self.vis_sampled.get_antenna_gains(), time, freq)
+            xlabel = "g_true"
+            title = "Antenna gains"
+            stats_tag = "G"
+        elif param == "V":
+            p_true = self.select_values_by_time_freq(self.vis_true.project_model(), time, freq)
+            p_redcal = self.select_values_by_time_freq(self.vis_redcal.project_model(), time, freq)
+            p_sampled = self.select_values_by_time_freq(self.vis_sampled.project_model(), time, freq)
+            xlabel = "V_true"
+            title = "V"
+            stats_tag = "V"
+        
+        
+        p_true = np.ravel(p_true)
+        p_redcal = np.ravel(p_redcal)
+        p_sampled = np.ravel(p_sampled)
+        
+        # Amp 1:1
+        plt.subplot(8, 1, 1)
+        order = np.abs(p_true).argsort()
+        plt.plot(np.abs(p_true[order]), 
+                 np.abs(p_true[order]), "k", linewidth=0.6,  label="1:1")
+        plt.plot(np.abs(p_true[order]), 
+                 np.abs(p_redcal[order]), "r", linewidth=0.6,  label="Redcal")
+        print_fit_stats("Redcal Amp", np.abs(p_true[order]), np.abs(p_redcal[order]))
+        plt.plot(np.abs(p_true[order]), 
+                 np.abs(p_sampled[order]), "b", linewidth=0.6,  label="Sampled")
+        plt.scatter(np.abs(p_true[order]), np.full(p_true.size, 0), marker=".", s=2, c="y")
+        print_fit_stats("Sampled Amp", np.abs(p_true[order]), np.abs(p_sampled[order]))
+        plt.legend()
+        plt.xlabel(xlabel+" amplitude")
+        plt.ylabel("Amplitude")
+        plt.title(title+" (Amplitude)")
+        
+        # Phase 1:1
+        plt.subplot(8, 1, 2)
+        order = np.angle(p_true).argsort()
+        plt.plot(np.angle(p_true.astype(np.complex64)[order]), 
+                 np.angle(p_true.astype(np.complex64)[order]), "k", linewidth=0.6,  label="1:1")
+        plt.plot(np.angle(p_true.astype(np.complex64)[order]), 
+                 np.angle(p_redcal.astype(np.complex64)[order]), "r", linewidth=0.6,  label="Redcal")
+        print_fit_stats("Redcal Phase", np.angle(p_true[order]), np.angle(p_redcal[order]))
+        plt.plot(np.angle(p_true.astype(np.complex64)[order]), 
+                 np.angle(p_sampled.astype(np.complex64)[order]), "b", linewidth=0.6,  label="Sampled")
+        min_phase = np.min(np.angle(p_sampled.astype(np.complex64)[order]))
+        min_phase = min(min_phase, np.min(np.angle(p_true.astype(np.complex64)[order])))
+        min_phase = min(min_phase, np.min(np.angle(p_redcal.astype(np.complex64)[order])))
+        max_phase = np.max(np.angle(p_sampled.astype(np.complex64)[order]))
+        max_phase = max(min_phase, np.max(np.angle(p_true.astype(np.complex64)[order])))
+        max_phase = max(min_phase, np.max(np.angle(p_redcal.astype(np.complex64)[order])))
+
+        plt.scatter(np.angle(p_true.astype(np.complex64)[order]), np.full(p_true.size, min_phase-(max_phase-min_phase)*0.05), marker=".", s=2, c="y")
+        print_fit_stats("Sampled Phase", np.angle(p_true[order]), np.angle(p_sampled[order]))
+        plt.legend()
+        plt.xlabel(xlabel+" phase")
+        plt.ylabel("Phase")
+        plt.title(title+" (Phase)")
+        plt.tight_layout()
+        
+        # Amp diff
+        plt.subplot(8, 1, 3)
+        order = np.abs(p_true).argsort()
+        plt.plot(np.abs(p_true[order]), 
+                 np.abs(p_redcal[order])-np.abs(p_true[order]), "r", linewidth=0.6,  label="Redcal")
+        plt.plot(np.abs(p_true[order]), 
+                 np.abs(p_sampled[order])-np.abs(p_true[order]), "b", linewidth=0.6,  label="Sampled")
+        plt.legend()
+        plt.xlabel(xlabel+" amplitude")
+        plt.ylabel("Amplitude Diff")
+        plt.title(title+" difference (Amplitude)")
+        
+        # Phase diff
+        plt.subplot(8, 1, 4)
+        order = np.angle(p_true).argsort()
+        plt.plot(np.angle(p_true.astype(np.complex64)[order]), 
+                 np.angle(p_redcal.astype(np.complex64)[order]-np.angle(p_true.astype(np.complex64)[order])), "r", linewidth=0.6,  label="Redcal")
+        plt.plot(np.angle(p_true.astype(np.complex64)[order]), 
+                 np.angle(p_sampled.astype(np.complex64)[order]-np.angle(p_true.astype(np.complex64)[order])), "b", linewidth=0.6,  label="Sampled")
+        plt.legend()
+        plt.xlabel(xlabel+" phase")
+        plt.ylabel("Phase Diff")
+        plt.title(title+" difference (Phase)")
+        plt.tight_layout()
+        
+        x = np.ravel(split_re_im(self.vis_redcal.V_model))
+        print(x.min(), x.max(), np.abs(x).mean())
+        print(stats_tag+" rms true diff redcal amp", rms(np.abs(p_true[order]), np.abs(p_redcal[order])))
+        print(stats_tag+" rms true diff sampled amp", rms(np.abs(p_true[order]), np.abs(p_sampled[order])))
+        print(stats_tag+" rms true diff redcal phase", rms(np.angle(p_true[order]), np.angle(p_redcal[order])))
+        print(stats_tag+" rms true diff sampled phase", rms(np.angle(p_true[order]), np.angle(p_sampled[order])))
+        print()
+ 
+        if plot_to is not None:
+            plt.savefig(plot_to+".pdf")  
+
         
     def plot_gains(self, time=None, freq=None, sigma=3, plot_to=None):
         def normalize_phases(phases):
@@ -1701,6 +1837,13 @@ class Sampler:
         V = np.reshape(V, (self.vis_redcal.ntime, self.vis_redcal.nfreq, -1))
         return V
     
+    def V_probability(self, V):
+        V_split = split_re_im(np.ravel(V))
+        dV = self.V_mean-V_split
+        
+        return np.exp(-0.5*(np.sum(dV*self.Cv_diag*dV)))
+        
+    
     def bests(self, parameter, time=None, freq=None, method="mean", measure="rms"):
         """
         parameter: x or g
@@ -1926,8 +2069,11 @@ if __name__ == "__main__":
     import os, time, hickle, cProfile
     
     plt.rcParams['figure.figsize'] = [20, 20]
-    sampler = load_from_files("/data/scratch/apw737/catall_nobright/sampled_viscatBC_stretch0.01")
-    sampler.plot_results(plot_to="r")
+    sampler = load_from_files("/data/scratch/apw737/catall_nobright/sampled_viscatBC_unistretch0.01")
+    print(sampler.vis_redcal.get_rms())
+    print(sampler.vis_sampled.get_rms())
+    sampler.plot_results1(param="cal", plot_to="r")
+    #sampler.plot_results1(param="V", plot_to="r")
     exit()
     
     plt.subplot(2, 1, 1)

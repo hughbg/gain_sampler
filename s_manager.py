@@ -26,9 +26,10 @@ class SManager:
         assert 0 <= ignore_threshold and ignore_threshold < 1, "ignore_threshold must be in [0, 1)"
         assert modes is None or (isinstance(modes, int) and modes > 0), "modes must be a positive integer"
         assert (isinstance(scale, float) or isinstance(scale, int)) and scale > 0, "scale must be a positive number"
-        if isinstance(zoom_from, list) and len(zoom_from) == 2: zoom_from = ( zoom_from[0], zoom_from[1] )
-        assert isinstance(zoom_from, tuple) and len(zoom_from)== 2 and (isinstance(zoom_from[0], int) and zoom_from[0] > 0) and \
-                (isinstance(zoom_from[1], int) and zoom_from[1] > 0), "zoom_from must be a pair of positive integers"
+        if zoom_from is not None:
+            if isinstance(zoom_from, list) and len(zoom_from) == 2: zoom_from = ( zoom_from[0], zoom_from[1] )
+            assert isinstance(zoom_from, tuple) and len(zoom_from)== 2 and (isinstance(zoom_from[0], int) and zoom_from[0] > 0) and \
+                    (isinstance(zoom_from[1], int) and zoom_from[1] > 0), "zoom_from must be a pair of positive integers"
             
         x = np.arange(-1, 1, 2.0/self.ntime)    # ntime values from [-1, 1)
         y = np.arange(-1, 1, 2.0/self.nfreq)
@@ -42,9 +43,12 @@ class SManager:
         data = np.zeros((x.size, y.size))
         center_x = data.shape[0]//2                    # if ntime=16 this will be 8
         center_y = data.shape[1]//2
+        
+        filled_fft = False
         if modes is None:
             i_start = j_start = 0
             i_end = x.size; j_end = y.size
+            filled_fft = True
         else:
             i_start = center_x-modes                  
             j_start = center_y-modes
@@ -55,10 +59,13 @@ class SManager:
                 print("WARNING: Too many modes requested. All non-zero modes will be used.")
                 i_start = j_start = 0
                 i_end = x.size; j_end = y.size
+                filled_fft = True
                 
         for i in range(i_start, i_end, 1):
             for j in range(j_start, j_end, 1):
-                data[i][j] = func(x[i], y[j])*scale
+                if filled_fft or ( not filled_fft and not (( i == i_start and j== j_start ) or ( i == i_end-1 and j== j_end-1 )) and
+                    not (( i == i_start and j== j_end-1 ) or ( i == i_end-1 and j == j_start ))):
+                    data[i][j] = func(x[i], y[j])*scale
                 
         self.gain_smooth_modes = (i_start, i_end, j_start, j_end)
             
@@ -68,7 +75,7 @@ class SManager:
         data[:, center_y] = 0      # DC
         
         assert np.sum(data) > 0, "All modes are zero-valued"
-        
+                
         # Now we can control the sigma of the x values that will be generated. See parsevals.ipynb
         # The sigma of the x_real and x_imag values will be the sigma of data. 
         #data *= x_prior_sigma/np.std(data)
@@ -154,15 +161,18 @@ if __name__ == "__main__":
     np.set_printoptions(linewidth=140, precision=4)
     import matplotlib.pyplot as plt
     sm = SManager(16, 16, 4)
+    from calcs import unflatten_complex_2d
     
     dc = lambda x, y: 1 if x==0 and y == 0 else 0
     flat = lambda x, y: 1
     gauss = lambda x, y: np.exp(-0.5*(x**2+y**2)/.01)
-    S, data, _ = sm.generate_S(gauss, modes=8, view=True)
+    S, data, samp = sm.generate_S(flat, modes=None, view=True)
 
+    samp = unflatten_complex_2d(sm.sample("x"), shape=(16, 16))
+    plt.matshow(samp.real)
+    plt.savefig("x")
     
-    plt.matshow(data)
-    plt.savefig("x"); exit()
+    exit()
 
 
     x = sm.sample("x", exact=False)

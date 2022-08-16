@@ -1510,16 +1510,6 @@ def perturb_vis(vis, vis_perturb_percent):
 if __name__ == "__main__":
     
 
-    vc = VisCal("/data/scratch/apw737/catall_nobright/viscatBC")
-    print(np.mean(vc.chi2["Jee"][0]))
-    print(vc.get_chi2(over_all=True))
-    print(vc.get_chi2().shape)
-    exit()
-    box = (6, 11, 6, 11)
-    
-
-    vc.smooth_gains(box)
-    plt.plot(np.abs(vc.g_bar[:, 6, 4]))
-    plt.plot(np.abs(g_bar))
-    plt.show()
+    vc = VisSim(nant=4)
+    print(vc.get_rms())
     
